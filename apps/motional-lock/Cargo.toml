@@ -1,0 +1,27 @@
+[package]
+name = "motional-clients"
+version = "0.1.0"
+edition = "2021"
+description = "Motional Service Protocol clients for workstation and terminal automation."
+license = "MIT"
+
+[lib]
+name = "motional_clients"
+path = "src/lib.rs"
+
+[[bin]]
+name = "motional-gui"
+path = "src/bin/motional-gui.rs"
+
+[[bin]]
+name = "motional-cli"
+path = "src/bin/motional-cli.rs"
+
+[dependencies]
+anyhow = "1.0.98"
+clap = { version = "4.5.40", features = ["derive", "env"] }
+dirs = "6.0.0"
+eframe = "=0.33.2"
+reqwest = { version = "0.12.20", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
