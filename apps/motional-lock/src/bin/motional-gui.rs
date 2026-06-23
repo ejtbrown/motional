@@ -18,6 +18,7 @@ fn main() -> eframe::Result {
 
     let options = eframe::NativeOptions {
         viewport,
+        renderer: native_renderer(),
         ..Default::default()
     };
 
@@ -30,6 +31,16 @@ fn main() -> eframe::Result {
 
 fn app_icon() -> Option<egui::IconData> {
     eframe::icon_data::from_png_bytes(include_bytes!("../../assets/motional-icon.png")).ok()
+}
+
+#[cfg(target_os = "windows")]
+fn native_renderer() -> eframe::Renderer {
+    eframe::Renderer::Wgpu
+}
+
+#[cfg(not(target_os = "windows"))]
+fn native_renderer() -> eframe::Renderer {
+    eframe::Renderer::Glow
 }
 
 struct MotionalGuiApp {

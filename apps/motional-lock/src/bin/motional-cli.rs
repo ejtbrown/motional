@@ -7,11 +7,7 @@ use motional_clients::actions::{execute_actions, parse_cli_action, Action, Actio
 use motional_clients::msp::{MspConnection, MspEvent, SensorState};
 
 #[derive(Debug, Parser)]
-#[command(
-    author,
-    version,
-    about = "Linux CLI client for Motional Service Protocol"
-)]
+#[command(author, version, about = "CLI client for Motional Service Protocol")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

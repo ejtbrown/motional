@@ -731,7 +731,11 @@ fn press_key(_keystroke: &str) -> Result<()> {
 
 #[derive(Clone)]
 enum CommandSpec {
-    Program { program: String, args: Vec<String> },
+    Program {
+        program: String,
+        args: Vec<String>,
+    },
+    #[cfg(target_os = "linux")]
     Shell(String),
 }
 
@@ -742,10 +746,12 @@ fn command(program: &str, args: &[&str]) -> CommandSpec {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn shell(command: &str) -> CommandSpec {
     CommandSpec::Shell(command.to_string())
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run_candidates(candidates: &[CommandSpec]) -> Result<()> {
     let mut errors = Vec::new();
     for candidate in candidates {
@@ -771,6 +777,7 @@ fn run_command_spec(spec: &CommandSpec) -> Result<()> {
             program,
             &args.iter().map(String::as_str).collect::<Vec<_>>(),
         ),
+        #[cfg(target_os = "linux")]
         CommandSpec::Shell(command) => run_shell(command),
     }
 }
@@ -787,6 +794,7 @@ fn run_command(program: &str, args: &[&str]) -> Result<()> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn run_shell(command: &str) -> Result<()> {
     let status = if cfg!(target_os = "windows") {
         Command::new("cmd").args(["/C", command]).status()

@@ -6,7 +6,7 @@ The project has two parts:
 
 - `hubitat/Motional.groovy`: a Hubitat app that exposes selected motion and presence sensors through token-scoped HTTP endpoints.
 - `motional-service-protocol.md`: a source-neutral TCP protocol for Motional service implementations.
-- `apps/motional-lock`: cross-platform GUI and Linux CLI clients that speak Motional Service Protocol.
+- `apps/motional-lock`: cross-platform GUI and CLI clients that speak Motional Service Protocol.
 
 ## Hubitat App
 
@@ -66,7 +66,7 @@ Each GUI server entry also supports connection-state actions. A typical resilien
 
 That lets Motional control lock and sleep while the service is reachable, then falls back to the operating system's normal delay-based behavior if the Motional server becomes unavailable.
 
-Use the Linux CLI to list sensors:
+Use the CLI to list sensors:
 
 ```sh
 ./target/release/motional-cli list \
@@ -74,7 +74,7 @@ Use the Linux CLI to list sensors:
   --token "<motional-token>"
 ```
 
-Watch one sensor from the Linux CLI:
+Watch one sensor from the CLI:
 
 ```sh
 ./target/release/motional-cli watch \
@@ -85,13 +85,18 @@ Watch one sensor from the Linux CLI:
   --on-absence power-off-display
 ```
 
-Linux CLI action specs:
+CLI action specs:
 
-- `logout-local-terminal-users`
 - `power-off-display`
 - `power-on-display`
 - `shut-down-system`
+- `disable-timed-screen-lock`
+- `enable-timed-screen-lock`
+- `disable-timed-sleep`
+- `enable-timed-sleep`
 - `rest|METHOD|URL|BODY`
 - `rest|METHOD|URL|@/path/to/body-file`
 
-The GUI action set includes Lock Screen, Unlock Screen, Power Off Display, Power On Display, Shut Down System, Key Press, and REST API Call.
+Linux also supports `logout-local-terminal-users`.
+
+The GUI action set includes Lock Screen, Unlock Screen, Power Off Display, Power On Display, Shut Down System, Key Press, and REST API Call. Unlock Screen is only available where the operating system exposes a safe unlock command; macOS and Windows intentionally report it as unsupported.

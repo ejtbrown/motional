@@ -25,12 +25,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --locked
       - run: cargo build --release --locked --bins
+      - if: runner.os == 'macOS'
+        run: |
+          app_dir="$(./package-macos.sh)"
+          test -x "$app_dir/Contents/MacOS/Motional"
+          test -f "$app_dir/Contents/Resources/Motional.icns"
+          test -f "$app_dir/Contents/PkgInfo"
+          plutil -lint "$app_dir/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_dir/Contents/Info.plist" | grep -Fx Motional
       - uses: actions/upload-artifact@v4
         with:
           name: motional-clients-${{ runner.os }}
           path: |
             apps/motional-lock/target/release/motional-gui
             apps/motional-lock/target/release/motional-gui.exe
+            apps/motional-lock/target/release/bundle/macos/Motional.app/**
             apps/motional-lock/target/release/motional-cli
             apps/motional-lock/target/release/motional-cli.exe
           if-no-files-found: ignore
