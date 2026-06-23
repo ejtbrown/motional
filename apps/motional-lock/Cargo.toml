@@ -28,6 +28,9 @@ serde_json = "1.0.140"
 [build-dependencies]
 winresource = "0.1.31"
 
+[dev-dependencies]
+tempfile = "3.27.0"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 eframe = { version = "=0.33.2", default-features = false, features = [
     "accesskit",

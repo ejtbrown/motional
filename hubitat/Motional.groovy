@@ -36,11 +36,13 @@ mappings {
 }
 
 def installed() {
+    clearPlaintextToken()
     initialize()
 }
 
 def updated() {
     unsubscribe()
+    clearPlaintextToken()
     initialize()
 }
 
@@ -60,6 +62,7 @@ def initialize() {
 
 def mainPage() {
     initializeState()
+    clearExpiredPlaintextToken()
 
     dynamicPage(name: "mainPage", title: "Motional", install: true, uninstall: true) {
         section("Sensors") {
@@ -145,13 +148,14 @@ def deleteTokenPage() {
 
 def appButtonHandler(buttonName) {
     initializeState()
+    clearExpiredPlaintextToken()
 
     if (buttonName == "createTokenButton") {
         createMotionalToken()
     } else if (buttonName == "deleteTokenButton") {
         deleteMotionalToken()
     } else if (buttonName == "clearLatestTokenButton") {
-        state.lastCreatedTokenValue = null
+        clearPlaintextToken()
     }
 }
 
@@ -160,9 +164,7 @@ def healthEndpoint() {
 
     renderJson(200, [
         ok: true,
-        app: "Motional",
-        sensors: sensorOptions().keySet().sort(),
-        tokenCount: ((atomicState.tokens ?: [:]) as Map).size()
+        app: "Motional"
     ])
 }
 
@@ -233,9 +235,27 @@ private void createMotionalToken() {
     ]
     atomicState.tokens = tokens
     state.lastCreatedTokenValue = token
+    state.lastCreatedTokenCreatedAt = isoDate(new Date())
 
     app.updateSetting("newTokenLabel", [type: "text", value: ""])
     app.updateSetting("newTokenSensors", [type: "enum", value: []])
+}
+
+private void clearExpiredPlaintextToken() {
+    if (!state.lastCreatedTokenValue) {
+        state.lastCreatedTokenCreatedAt = null
+        return
+    }
+
+    Date createdAt = parseIsoDate(state.lastCreatedTokenCreatedAt as String)
+    if (!createdAt || new Date().time - createdAt.time > 5L * 60L * 1000L) {
+        clearPlaintextToken()
+    }
+}
+
+private void clearPlaintextToken() {
+    state.lastCreatedTokenValue = null
+    state.lastCreatedTokenCreatedAt = null
 }
 
 private void deleteMotionalToken() {
@@ -286,7 +306,7 @@ private String extractMotionalToken() {
         return authorization.substring(7).trim()
     }
 
-    params?.token ?: params?.motional_token
+    null
 }
 
 private Map sensorStatus(device, String apiName) {

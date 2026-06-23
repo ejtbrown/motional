@@ -195,6 +195,7 @@ impl MotionalGuiApp {
         let label = entry.label.clone();
         let address = entry.address.clone();
         let token = entry.token.clone();
+        let allow_insecure_msp = entry.allow_insecure_msp;
         let tx = self.tx.clone();
 
         self.statuses
@@ -202,8 +203,13 @@ impl MotionalGuiApp {
         self.push_log(format!("{label}: refreshing sensor list"));
 
         thread::spawn(move || {
-            let result = MspConnection::connect(&address, token_option(&token), "motional-gui")
-                .and_then(|mut connection| connection.list_sensors());
+            let result = MspConnection::connect(
+                &address,
+                token_option(&token),
+                "motional-gui",
+                allow_insecure_msp,
+            )
+            .and_then(|mut connection| connection.list_sensors());
 
             match result {
                 Ok(sensors) => {
@@ -339,6 +345,18 @@ impl MotionalGuiApp {
                         ui.label("Token");
                         if ui
                             .add(egui::TextEdit::singleline(&mut entry.token).password(true))
+                            .changed()
+                        {
+                            self.dirty = true;
+                        }
+                        ui.end_row();
+
+                        ui.label("Insecure MSP");
+                        if ui
+                            .checkbox(
+                                &mut entry.allow_insecure_msp,
+                                "Allow remote plaintext token auth",
+                            )
                             .changed()
                         {
                             self.dirty = true;

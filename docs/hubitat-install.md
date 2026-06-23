@@ -10,6 +10,7 @@ Requests use two tokens when Hubitat endpoint OAuth is enabled:
 
 - Hubitat app endpoint token: passed as `access_token=<...>` in the URL.
 - Motional token: passed as `Authorization: Bearer <...>`.
+- Motional tokens are not accepted in query parameters.
 
 ```sh
 curl \
@@ -18,4 +19,3 @@ curl \
 ```
 
 The `<sensor-name>` path segment is the API name shown in the Motional app. It is derived from the device display name by lowercasing it and replacing non-alphanumeric characters with dashes. If two selected devices produce the same API name, Motional appends the Hubitat device id to keep names unique.
-

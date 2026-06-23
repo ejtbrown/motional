@@ -1,5 +1,5 @@
 use std::io::{BufRead, BufReader, ErrorKind, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const EVENT_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_MESSAGE_BYTES: usize = 65_536;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SensorDescription {
@@ -67,7 +68,12 @@ pub struct MspConnection {
 }
 
 impl MspConnection {
-    pub fn connect(address: &str, token: Option<&str>, client_name: &str) -> Result<Self> {
+    pub fn connect(
+        address: &str,
+        token: Option<&str>,
+        client_name: &str,
+        allow_insecure_msp: bool,
+    ) -> Result<Self> {
         let stream = connect_tcp(address)?;
         stream
             .set_read_timeout(Some(DEFAULT_TIMEOUT))
@@ -109,6 +115,13 @@ impl MspConnection {
             let token = token
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| anyhow!("MSP server requires a bearer token"))?;
+            ensure_safe_token_transport(
+                connection
+                    .writer
+                    .peer_addr()
+                    .context("failed to inspect MSP peer address")?,
+                allow_insecure_msp,
+            )?;
             connection.authenticate(token)?;
         }
 
@@ -224,21 +237,49 @@ impl MspConnection {
     }
 
     fn read_value(&mut self) -> Result<Value> {
-        let mut line = String::new();
-        let bytes = match self.reader.read_line(&mut line) {
+        read_value_from(&mut self.reader)
+    }
+}
+
+fn read_value_from<R: BufRead>(reader: &mut R) -> Result<Value> {
+    let mut line = Vec::new();
+    loop {
+        let available = match reader.fill_buf() {
             Ok(bytes) => bytes,
             Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
                 bail!("MSP read timed out")
             }
             Err(error) => return Err(error).context("failed to read MSP message"),
         };
-        if bytes == 0 {
+        if available.is_empty() {
             bail!("MSP server closed the connection");
         }
-        if bytes > 65_536 {
+
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let take = newline.map(|index| index + 1).unwrap_or(available.len());
+        if line.len() + take > MAX_MESSAGE_BYTES {
             bail!("MSP message exceeded 65536 bytes");
         }
-        serde_json::from_str(line.trim_end()).context("failed to decode MSP JSON message")
+
+        line.extend_from_slice(&available[..take]);
+        reader.consume(take);
+
+        if newline.is_some() {
+            while matches!(line.last(), Some(b'\n' | b'\r')) {
+                line.pop();
+            }
+            return serde_json::from_slice(&line).context("failed to decode MSP JSON message");
+        }
+    }
+}
+
+fn ensure_safe_token_transport(peer_addr: SocketAddr, allow_insecure_msp: bool) -> Result<()> {
+    if allow_insecure_msp || peer_addr.ip().is_loopback() {
+        Ok(())
+    } else {
+        bail!(
+            "refusing to send MSP bearer token over plaintext TCP to {peer_addr}; use a secure tunnel or allow insecure MSP explicitly"
+        )
     }
 }
 
@@ -373,5 +414,48 @@ mod tests {
             }
             _ => panic!("wrong event type"),
         }
+    }
+
+    #[test]
+    fn rejects_oversized_message_before_newline() {
+        let oversized = vec![b'a'; MAX_MESSAGE_BYTES + 1];
+        let mut reader = BufReader::new(oversized.as_slice());
+        let error = read_value_from(&mut reader).unwrap_err().to_string();
+        assert!(error.contains("MSP message exceeded 65536 bytes"));
+    }
+
+    #[test]
+    fn parses_message_at_size_limit() {
+        let mut line = br#"{"type":"ok","padding":""#.to_vec();
+        let padding_len = MAX_MESSAGE_BYTES - line.len() - br#""}"#.len() - 1;
+        line.extend(std::iter::repeat_n(b'a', padding_len));
+        line.extend_from_slice(br#""}"#);
+        line.push(b'\n');
+        assert_eq!(line.len(), MAX_MESSAGE_BYTES);
+
+        let mut reader = BufReader::new(line.as_slice());
+        let value = read_value_from(&mut reader).unwrap();
+        assert_eq!(value["type"], "ok");
+    }
+
+    #[test]
+    fn token_transport_allows_loopback_without_insecure_opt_in() {
+        let peer_addr = "127.0.0.1:7080".parse().unwrap();
+        ensure_safe_token_transport(peer_addr, false).unwrap();
+    }
+
+    #[test]
+    fn token_transport_rejects_remote_without_insecure_opt_in() {
+        let peer_addr = "192.0.2.10:7080".parse().unwrap();
+        let error = ensure_safe_token_transport(peer_addr, false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("refusing to send MSP bearer token"));
+    }
+
+    #[test]
+    fn token_transport_allows_remote_with_insecure_opt_in() {
+        let peer_addr = "192.0.2.10:7080".parse().unwrap();
+        ensure_safe_token_transport(peer_addr, true).unwrap();
     }
 }

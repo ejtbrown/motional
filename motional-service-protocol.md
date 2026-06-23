@@ -366,6 +366,8 @@ Clients MUST NOT send commands before successful `auth` when `auth_required` is 
 
 Deployments SHOULD avoid sending MSP bearer tokens over untrusted networks without an encrypted transport such as WireGuard, TLS, SSH tunneling, or an equivalent trusted overlay.
 
+Clients SHOULD fail closed before sending bearer tokens over plaintext TCP to non-loopback addresses unless the user explicitly enables insecure remote MSP token authentication.
+
 ## Concurrency
 
 Servers MUST support multiple simultaneous TCP clients.
@@ -483,4 +485,3 @@ A minimal compliant server:
 5. Maintains normalized state for every visible sensor.
 6. Sends `event` messages when subscribed sensor state changes.
 7. Enforces token authorization before revealing sensor names or states.
-

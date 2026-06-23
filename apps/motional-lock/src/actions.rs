@@ -247,9 +247,12 @@ fn rest_api_call(method: &str, url: &str, body: &str) -> Result<()> {
         Ok(())
     } else {
         let status = response.status();
-        let text = response.text().unwrap_or_default();
-        bail!("REST API returned {status}: {text}")
+        bail!("{}", rest_api_error_message(status))
     }
+}
+
+fn rest_api_error_message(status: reqwest::StatusCode) -> String {
+    format!("REST API returned {status}")
 }
 
 #[cfg(target_os = "linux")]
@@ -936,5 +939,11 @@ mod tests {
                 body: "{\"ok\":true}".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn rest_api_error_message_omits_response_body() {
+        let message = rest_api_error_message(reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(message, "REST API returned 400 Bad Request");
     }
 }

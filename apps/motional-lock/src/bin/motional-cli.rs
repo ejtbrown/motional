@@ -27,6 +27,9 @@ struct CommonArgs {
 
     #[arg(long, env = "MOTIONAL_TOKEN")]
     token: Option<String>,
+
+    #[arg(long, env = "MOTIONAL_ALLOW_INSECURE_MSP", default_value_t = false)]
+    allow_insecure_msp: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -249,7 +252,12 @@ fn print_state(state: &SensorState) {
 }
 
 fn connect(args: &CommonArgs, client_name: &str) -> Result<MspConnection> {
-    MspConnection::connect(&args.server, args.token.as_deref(), client_name)
+    MspConnection::connect(
+        &args.server,
+        args.token.as_deref(),
+        client_name,
+        args.allow_insecure_msp,
+    )
 }
 
 fn parse_actions(specs: &[String]) -> Result<Vec<Action>> {

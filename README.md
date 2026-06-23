@@ -70,7 +70,7 @@ Use the CLI to list sensors:
 
 ```sh
 ./target/release/motional-cli list \
-  --server 192.0.2.10:7080 \
+  --server 127.0.0.1:7080 \
   --token "<motional-token>"
 ```
 
@@ -78,12 +78,14 @@ Watch one sensor from the CLI:
 
 ```sh
 ./target/release/motional-cli watch \
-  --server 192.0.2.10:7080 \
+  --server 127.0.0.1:7080 \
   --token "<motional-token>" \
   --sensor office \
   --on-motion power-on-display \
   --on-absence power-off-display
 ```
+
+When a Motional token is configured, clients send it only to loopback MSP servers by default. For remote servers, use a secure tunnel such as WireGuard, TLS, or SSH port forwarding; plaintext remote token auth requires the explicit `--allow-insecure-msp` CLI flag or GUI checkbox.
 
 CLI action specs:
 

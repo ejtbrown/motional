@@ -9,13 +9,15 @@ Create `~/.config/systemd/user/motional-cli.service`:
 Description=Motional CLI automation
 
 [Service]
-ExecStart=%h/bin/motional-cli watch --server 192.0.2.10:7080 --token MOTIONAL_TOKEN --sensor office --on-motion power-on-display --on-absence power-off-display
+ExecStart=%h/bin/motional-cli watch --server 127.0.0.1:7080 --token MOTIONAL_TOKEN --sensor office --on-motion power-on-display --on-absence power-off-display
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=default.target
 ```
+
+Use a secure tunnel such as WireGuard, TLS, or SSH port forwarding when the MSP server is not on loopback. Plaintext remote token auth requires adding `--allow-insecure-msp` explicitly.
 
 Enable it:
 
