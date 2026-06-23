@@ -31,7 +31,7 @@ jobs:
       - if: runner.os == 'Linux'
         run: cargo audit
       - if: runner.os == 'Linux'
-        run: go install github.com/gitleaks/gitleaks/v8@v8.30.1
+        run: go install github.com/zricethezav/gitleaks/v8@v8.30.1
       - if: runner.os == 'Linux'
         run: |
           "$(go env GOPATH)/bin/gitleaks" detect --source ../.. --no-git --redact --verbose
