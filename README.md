@@ -85,7 +85,7 @@ Watch one sensor from the CLI:
   --on-absence power-off-display
 ```
 
-When a Motional token is configured, clients send it only to loopback MSP servers by default. For remote servers, use a secure tunnel such as WireGuard, TLS, or SSH port forwarding; plaintext remote token auth requires the explicit `--allow-insecure-msp` CLI flag or GUI checkbox.
+MSP is a plaintext TCP protocol. Run it only on trusted networks or behind a secure transport such as WireGuard, TLS termination, or SSH port forwarding.
 
 CLI action specs:
 

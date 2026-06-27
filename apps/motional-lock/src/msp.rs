@@ -1,5 +1,5 @@
 use std::io::{BufRead, BufReader, ErrorKind, Write};
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
-pub const EVENT_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+pub const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_MESSAGE_BYTES: usize = 65_536;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,15 +65,11 @@ pub struct MspConnection {
     writer: TcpStream,
     reader: BufReader<TcpStream>,
     next_id: u64,
+    heartbeat_interval: Duration,
 }
 
 impl MspConnection {
-    pub fn connect(
-        address: &str,
-        token: Option<&str>,
-        client_name: &str,
-        allow_insecure_msp: bool,
-    ) -> Result<Self> {
+    pub fn connect(address: &str, token: Option<&str>, client_name: &str) -> Result<Self> {
         let stream = connect_tcp(address)?;
         stream
             .set_read_timeout(Some(DEFAULT_TIMEOUT))
@@ -87,6 +83,7 @@ impl MspConnection {
             writer: stream,
             reader,
             next_id: 1,
+            heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
         };
 
         let hello_id = connection.next_request_id();
@@ -106,6 +103,7 @@ impl MspConnection {
         if hello.get("version").and_then(Value::as_u64) != Some(1) {
             bail!("MSP server does not support protocol version 1");
         }
+        connection.heartbeat_interval = heartbeat_interval_from_hello(&hello);
 
         let auth_required = hello
             .get("auth_required")
@@ -115,13 +113,6 @@ impl MspConnection {
             let token = token
                 .filter(|value| !value.trim().is_empty())
                 .ok_or_else(|| anyhow!("MSP server requires a bearer token"))?;
-            ensure_safe_token_transport(
-                connection
-                    .writer
-                    .peer_addr()
-                    .context("failed to inspect MSP peer address")?,
-                allow_insecure_msp,
-            )?;
             connection.authenticate(token)?;
         }
 
@@ -173,28 +164,31 @@ impl MspConnection {
 
         self.reader
             .get_ref()
-            .set_read_timeout(Some(EVENT_IDLE_TIMEOUT))
+            .set_read_timeout(Some(self.heartbeat_interval))
             .context("failed to set MSP event read timeout")?;
 
         Ok(subscription_id)
     }
 
     pub fn ping(&mut self) -> Result<()> {
-        let id = self.next_request_id();
-        self.send(json!({
-            "id": id,
-            "type": "ping"
-        }))?;
+        let id = self.send_ping()?;
         let response = self.read_response(&id)?;
         ensure_type(&response, "pong")
     }
 
     pub fn read_event(&mut self) -> Result<MspEvent> {
-        let value = self.read_value()?;
-        match value.get("type").and_then(Value::as_str) {
-            Some("event") => parse_event(value),
-            Some("error") => Err(error_from_value(&value)),
-            _ => Ok(MspEvent::Other(value)),
+        loop {
+            let Some(value) = self.read_value_or_timeout()? else {
+                self.send_ping()?;
+                continue;
+            };
+
+            match value.get("type").and_then(Value::as_str) {
+                Some("event") => return parse_event(value),
+                Some("error") => return Err(error_from_value(&value)),
+                Some("pong") => continue,
+                _ => return Ok(MspEvent::Other(value)),
+            }
         }
     }
 
@@ -236,18 +230,38 @@ impl MspConnection {
         self.writer.flush().context("failed to flush MSP message")
     }
 
+    fn send_ping(&mut self) -> Result<String> {
+        let id = self.next_request_id();
+        self.send(json!({
+            "id": id,
+            "type": "ping"
+        }))?;
+        Ok(id)
+    }
+
     fn read_value(&mut self) -> Result<Value> {
         read_value_from(&mut self.reader)
+    }
+
+    fn read_value_or_timeout(&mut self) -> Result<Option<Value>> {
+        read_value_or_timeout_from(&mut self.reader)
     }
 }
 
 fn read_value_from<R: BufRead>(reader: &mut R) -> Result<Value> {
+    read_value_or_timeout_from(reader)?.ok_or_else(|| anyhow!("MSP read timed out"))
+}
+
+fn read_value_or_timeout_from<R: BufRead>(reader: &mut R) -> Result<Option<Value>> {
     let mut line = Vec::new();
     loop {
         let available = match reader.fill_buf() {
             Ok(bytes) => bytes,
             Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
-                bail!("MSP read timed out")
+                if line.is_empty() {
+                    return Ok(None);
+                }
+                bail!("MSP partial message timed out");
             }
             Err(error) => return Err(error).context("failed to read MSP message"),
         };
@@ -268,19 +282,20 @@ fn read_value_from<R: BufRead>(reader: &mut R) -> Result<Value> {
             while matches!(line.last(), Some(b'\n' | b'\r')) {
                 line.pop();
             }
-            return serde_json::from_slice(&line).context("failed to decode MSP JSON message");
+            return serde_json::from_slice(&line)
+                .map(Some)
+                .context("failed to decode MSP JSON message");
         }
     }
 }
 
-fn ensure_safe_token_transport(peer_addr: SocketAddr, allow_insecure_msp: bool) -> Result<()> {
-    if allow_insecure_msp || peer_addr.ip().is_loopback() {
-        Ok(())
-    } else {
-        bail!(
-            "refusing to send MSP bearer token over plaintext TCP to {peer_addr}; use a secure tunnel or allow insecure MSP explicitly"
-        )
-    }
+fn heartbeat_interval_from_hello(hello: &Value) -> Duration {
+    let seconds = hello
+        .get("heartbeat_seconds")
+        .and_then(Value::as_u64)
+        .unwrap_or(DEFAULT_HEARTBEAT_INTERVAL.as_secs())
+        .max(1);
+    Duration::from_secs((seconds / 2).max(1))
 }
 
 fn connect_tcp(address: &str) -> Result<TcpStream> {
@@ -439,23 +454,26 @@ mod tests {
     }
 
     #[test]
-    fn token_transport_allows_loopback_without_insecure_opt_in() {
-        let peer_addr = "127.0.0.1:7080".parse().unwrap();
-        ensure_safe_token_transport(peer_addr, false).unwrap();
+    fn heartbeat_interval_uses_half_server_heartbeat() {
+        let hello = json!({
+            "type": "server_hello",
+            "heartbeat_seconds": 30
+        });
+        assert_eq!(
+            heartbeat_interval_from_hello(&hello),
+            Duration::from_secs(15)
+        );
     }
 
     #[test]
-    fn token_transport_rejects_remote_without_insecure_opt_in() {
-        let peer_addr = "192.0.2.10:7080".parse().unwrap();
-        let error = ensure_safe_token_transport(peer_addr, false)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("refusing to send MSP bearer token"));
-    }
-
-    #[test]
-    fn token_transport_allows_remote_with_insecure_opt_in() {
-        let peer_addr = "192.0.2.10:7080".parse().unwrap();
-        ensure_safe_token_transport(peer_addr, true).unwrap();
+    fn heartbeat_interval_clamps_to_at_least_one_second() {
+        let hello = json!({
+            "type": "server_hello",
+            "heartbeat_seconds": 0
+        });
+        assert_eq!(
+            heartbeat_interval_from_hello(&hello),
+            Duration::from_secs(1)
+        );
     }
 }

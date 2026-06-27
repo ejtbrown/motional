@@ -364,9 +364,7 @@ Servers SHOULD support per-token sensor visibility. `list`, `get`, and `subscrib
 
 Clients MUST NOT send commands before successful `auth` when `auth_required` is true.
 
-Deployments SHOULD avoid sending MSP bearer tokens over untrusted networks without an encrypted transport such as WireGuard, TLS, SSH tunneling, or an equivalent trusted overlay.
-
-Clients SHOULD fail closed before sending bearer tokens over plaintext TCP to non-loopback addresses unless the user explicitly enables insecure remote MSP token authentication.
+MSP is a plaintext TCP protocol. Deployments SHOULD avoid sending MSP bearer tokens over untrusted networks without an encrypted transport such as WireGuard, TLS, SSH tunneling, or an equivalent trusted overlay.
 
 ## Concurrency
 

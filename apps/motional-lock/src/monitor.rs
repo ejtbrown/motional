@@ -119,7 +119,6 @@ fn monitor_once(
         &entry.address,
         token_option(&entry.token),
         "motional-gui-monitor",
-        entry.allow_insecure_msp,
     )?;
     let subscription_id = connection.subscribe(std::slice::from_ref(&entry.sensor), true)?;
 

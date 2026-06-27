@@ -1,0 +1,116 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: release-build (${{ matrix.asset_name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            asset_name: motional-linux-x86_64
+            archive_name: motional-linux-x86_64.tar.gz
+            package_command: linux
+          - os: windows-latest
+            asset_name: motional-windows-x86_64
+            archive_name: motional-windows-x86_64.zip
+            package_command: windows
+          - os: macos-15-intel
+            asset_name: motional-macos-x86_64
+            archive_name: motional-macos-x86_64.zip
+            package_command: macos
+          - os: macos-latest
+            asset_name: motional-macos-aarch64
+            archive_name: motional-macos-aarch64.zip
+            package_command: macos
+
+    defaults:
+      run:
+        working-directory: apps/motional-lock
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - run: cargo test --locked
+      - run: cargo build --release --locked --bins
+
+      - name: Package Linux release
+        if: matrix.package_command == 'linux'
+        run: |
+          set -euo pipefail
+          mkdir -p "dist/${{ matrix.asset_name }}"
+          cp target/release/motional-cli "dist/${{ matrix.asset_name }}/"
+          cp target/release/motional-gui "dist/${{ matrix.asset_name }}/"
+          cp ../../README.md ../../setup-linux.sh "dist/${{ matrix.asset_name }}/"
+          tar -C dist -czf "dist/${{ matrix.archive_name }}" "${{ matrix.asset_name }}"
+
+      - name: Package Windows release
+        if: matrix.package_command == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist/${{ matrix.asset_name }}" | Out-Null
+          Copy-Item "target/release/motional-cli.exe" "dist/${{ matrix.asset_name }}/"
+          Copy-Item "target/release/motional-gui.exe" "dist/${{ matrix.asset_name }}/"
+          Copy-Item "../../README.md" "dist/${{ matrix.asset_name }}/"
+          Compress-Archive -Path "dist/${{ matrix.asset_name }}" -DestinationPath "dist/${{ matrix.archive_name }}" -Force
+
+      - name: Package macOS release
+        if: matrix.package_command == 'macos'
+        run: |
+          set -euo pipefail
+          app_dir="$(./package-macos.sh)"
+          mkdir -p "dist/${{ matrix.asset_name }}"
+          cp -R "$app_dir" "dist/${{ matrix.asset_name }}/"
+          cp target/release/motional-cli "dist/${{ matrix.asset_name }}/"
+          cp ../../README.md "dist/${{ matrix.asset_name }}/"
+          ditto -c -k --sequesterRsrc --keepParent "dist/${{ matrix.asset_name }}" "dist/${{ matrix.archive_name }}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: apps/motional-lock/dist/${{ matrix.archive_name }}
+          if-no-files-found: error
+
+  publish:
+    name: publish-release
+    runs-on: ubuntu-24.04
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate checksums
+        run: |
+          set -euo pipefail
+          cd release-assets
+          sha256sum * > SHA256SUMS
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          release_title="Motional ${TAG_NAME#v}"
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" release-assets/* --clobber
+          else
+            gh release create "$TAG_NAME" release-assets/* \
+              --verify-tag \
+              --title "$release_title" \
+              --notes "Release $release_title."
+          fi

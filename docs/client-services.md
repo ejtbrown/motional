@@ -17,7 +17,7 @@ RestartSec=5
 WantedBy=default.target
 ```
 
-Use a secure tunnel such as WireGuard, TLS, or SSH port forwarding when the MSP server is not on loopback. Plaintext remote token auth requires adding `--allow-insecure-msp` explicitly.
+MSP is a plaintext TCP protocol. Run it only on trusted networks or behind a secure transport such as WireGuard, TLS termination, or SSH port forwarding.
 
 Enable it:
 

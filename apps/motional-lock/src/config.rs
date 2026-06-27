@@ -24,8 +24,6 @@ pub struct ServerEntry {
     pub label: String,
     pub address: String,
     pub token: String,
-    #[serde(default)]
-    pub allow_insecure_msp: bool,
     pub sensor: String,
     #[serde(default)]
     pub on_connected: Vec<Action>,
@@ -45,7 +43,6 @@ impl ServerEntry {
             label: "New Motional sensor".to_string(),
             address: "127.0.0.1:7080".to_string(),
             token: String::new(),
-            allow_insecure_msp: false,
             sensor: String::new(),
             on_connected: Vec::new(),
             on_disconnected: Vec::new(),

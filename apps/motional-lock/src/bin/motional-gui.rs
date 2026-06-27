@@ -4,14 +4,21 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
+use chrono::Local;
 use eframe::egui;
 use motional_clients::actions::{Action, ActionTrigger};
 use motional_clients::config::{config_path, load_config, save_config, AppConfig, ServerEntry};
 use motional_clients::monitor::{spawn_entry_monitor, MonitorEvent, MonitorHandle};
 use motional_clients::msp::{MspConnection, SensorDescription, SensorState};
 
+const APP_ID: &str = "com.ejtbrown.motional";
+const APP_NAME: &str = "Motional";
+
 fn main() -> eframe::Result {
-    let mut viewport = egui::ViewportBuilder::default().with_inner_size([1040.0, 760.0]);
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_app_id(APP_ID)
+        .with_title(APP_NAME)
+        .with_inner_size([1040.0, 760.0]);
     if let Some(icon) = app_icon() {
         viewport = viewport.with_icon(icon);
     }
@@ -23,7 +30,7 @@ fn main() -> eframe::Result {
     };
 
     eframe::run_native(
-        "Motional",
+        APP_NAME,
         options,
         Box::new(|_cc| Ok(Box::new(MotionalGuiApp::new()))),
     )
@@ -137,24 +144,39 @@ impl MotionalGuiApp {
     }
 
     fn push_log(&mut self, message: String) {
-        self.logs.push_front(message);
-        while self.logs.len() > 100 {
-            self.logs.pop_back();
+        let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
+        self.logs.push_back(format!("{timestamp}  {message}"));
+        while self.logs.len() > 500 {
+            self.logs.pop_front();
         }
+    }
+
+    fn entry_log_label(&self, entry_id: &str) -> String {
+        self.config
+            .entries
+            .iter()
+            .find(|entry| entry.id == entry_id)
+            .and_then(|entry| {
+                let label = entry.label.trim();
+                (!label.is_empty()).then(|| label.to_string())
+            })
+            .unwrap_or_else(|| entry_id.to_string())
     }
 
     fn process_monitor_events(&mut self) {
         while let Ok(event) = self.rx.try_recv() {
             match event {
                 MonitorEvent::Status { entry_id, message } => {
+                    let label = self.entry_log_label(&entry_id);
                     self.statuses.insert(entry_id.clone(), message.clone());
-                    self.push_log(format!("{entry_id}: {message}"));
+                    self.push_log(format!("{label}: {message}"));
                 }
                 MonitorEvent::State { entry_id, state } => {
+                    let label = self.entry_log_label(&entry_id);
                     self.states.insert(entry_id.clone(), state.clone());
                     self.push_log(format!(
                         "{}: {} triggered={}",
-                        entry_id,
+                        label,
                         state.name,
                         state
                             .triggered
@@ -163,11 +185,12 @@ impl MotionalGuiApp {
                     ));
                 }
                 MonitorEvent::SensorList { entry_id, sensors } => {
+                    let label = self.entry_log_label(&entry_id);
                     let count = sensors.len();
                     self.sensors.insert(entry_id.clone(), sensors);
                     self.statuses
                         .insert(entry_id.clone(), format!("loaded {count} sensors"));
-                    self.push_log(format!("{entry_id}: loaded {count} sensors"));
+                    self.push_log(format!("{label}: loaded {count} sensors"));
                 }
                 MonitorEvent::Action {
                     entry_id,
@@ -176,9 +199,10 @@ impl MotionalGuiApp {
                     ok,
                     message,
                 } => {
+                    let label = self.entry_log_label(&entry_id);
                     let outcome = if ok { "ok" } else { "failed" };
                     self.push_log(format!(
-                        "{entry_id}: {} action {outcome}: {action}: {message}",
+                        "{label}: {} action {outcome}: {action}: {message}",
                         trigger.label()
                     ));
                 }
@@ -195,7 +219,6 @@ impl MotionalGuiApp {
         let label = entry.label.clone();
         let address = entry.address.clone();
         let token = entry.token.clone();
-        let allow_insecure_msp = entry.allow_insecure_msp;
         let tx = self.tx.clone();
 
         self.statuses
@@ -203,13 +226,8 @@ impl MotionalGuiApp {
         self.push_log(format!("{label}: refreshing sensor list"));
 
         thread::spawn(move || {
-            let result = MspConnection::connect(
-                &address,
-                token_option(&token),
-                "motional-gui",
-                allow_insecure_msp,
-            )
-            .and_then(|mut connection| connection.list_sensors());
+            let result = MspConnection::connect(&address, token_option(&token), "motional-gui")
+                .and_then(|mut connection| connection.list_sensors());
 
             match result {
                 Ok(sensors) => {
@@ -265,17 +283,23 @@ impl eframe::App for MotionalGuiApp {
             });
         });
 
-        egui::SidePanel::right("log")
+        egui::TopBottomPanel::bottom("log")
             .resizable(true)
-            .default_width(300.0)
+            .default_height(220.0)
+            .height_range(120.0..=520.0)
             .show(ctx, |ui| {
                 ui.heading("Activity");
                 ui.separator();
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    for log in &self.logs {
-                        ui.label(log);
-                    }
-                });
+                egui::ScrollArea::vertical()
+                    .id_salt("activity-log")
+                    .stick_to_bottom(true)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        for log in &self.logs {
+                            ui.label(log);
+                        }
+                    });
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -345,18 +369,6 @@ impl MotionalGuiApp {
                         ui.label("Token");
                         if ui
                             .add(egui::TextEdit::singleline(&mut entry.token).password(true))
-                            .changed()
-                        {
-                            self.dirty = true;
-                        }
-                        ui.end_row();
-
-                        ui.label("Insecure MSP");
-                        if ui
-                            .checkbox(
-                                &mut entry.allow_insecure_msp,
-                                "Allow remote plaintext token auth",
-                            )
                             .changed()
                         {
                             self.dirty = true;

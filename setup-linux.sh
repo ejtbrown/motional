@@ -2,12 +2,16 @@
 set -euo pipefail
 
 APP_NAME="Motional"
+APP_ID="com.ejtbrown.motional"
 BIN_NAME="motional-gui"
 INSTALL_BIN="/usr/bin/${BIN_NAME}"
-DESKTOP_FILE="/usr/share/applications/motional-gui.desktop"
-ICON_NAME="motional-gui"
+DESKTOP_FILE="/usr/share/applications/${APP_ID}.desktop"
+OLD_DESKTOP_FILE="/usr/share/applications/motional-gui.desktop"
+ICON_NAME="${APP_ID}"
 ICON_FILE="/usr/share/icons/hicolor/512x512/apps/${ICON_NAME}.png"
+OLD_ICON_FILE="/usr/share/icons/hicolor/512x512/apps/motional-gui.png"
 PIXMAP_ICON_FILE="/usr/share/pixmaps/${ICON_NAME}.png"
+OLD_PIXMAP_ICON_FILE="/usr/share/pixmaps/motional-gui.png"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLIENT_DIR="${REPO_ROOT}/apps/motional-lock"
 SOURCE_BIN="${CLIENT_DIR}/target/release/${BIN_NAME}"
@@ -51,6 +55,17 @@ else
 fi
 install -D -m 0644 "${ICON_SOURCE}" "${PIXMAP_ICON_FILE}"
 
+if [[ -f "${OLD_DESKTOP_FILE}" && "${OLD_DESKTOP_FILE}" != "${DESKTOP_FILE}" ]]; then
+  echo "Removing old desktop launcher ${OLD_DESKTOP_FILE}..."
+  rm -f "${OLD_DESKTOP_FILE}"
+fi
+for old_icon in "${OLD_ICON_FILE}" "${OLD_PIXMAP_ICON_FILE}"; do
+  if [[ -f "${old_icon}" ]]; then
+    echo "Removing old icon ${old_icon}..."
+    rm -f "${old_icon}"
+  fi
+done
+
 echo "Installing GNOME desktop launcher to ${DESKTOP_FILE}..."
 install -D -m 0644 /dev/stdin "${DESKTOP_FILE}" <<EOF
 [Desktop Entry]
@@ -63,6 +78,7 @@ Icon=${ICON_NAME}
 Terminal=false
 Categories=Utility;Settings;
 StartupNotify=true
+StartupWMClass=${APP_ID}
 EOF
 
 if command -v update-desktop-database >/dev/null 2>&1; then
