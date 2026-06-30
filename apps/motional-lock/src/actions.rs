@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::blocking::Client;
@@ -32,6 +34,118 @@ pub struct ActionResult {
     pub label: String,
     pub ok: bool,
     pub message: String,
+}
+
+#[derive(Debug, Default)]
+pub struct ActionSession {
+    original_settings: Mutex<OriginalSettings>,
+}
+
+#[derive(Debug, Default)]
+struct OriginalSettings {
+    order: Vec<String>,
+    values: HashMap<String, OriginalSetting>,
+}
+
+#[derive(Debug, Clone)]
+struct OriginalSetting {
+    label: String,
+    restore_commands: Vec<CommandSpec>,
+}
+
+impl ActionSession {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn restore_original_settings(&self) -> Vec<ActionResult> {
+        let originals = {
+            let mut settings = self.original_settings.lock().unwrap();
+            let order = std::mem::take(&mut settings.order);
+            let values = std::mem::take(&mut settings.values);
+            order
+                .into_iter()
+                .rev()
+                .filter_map(|key| values.get(&key).cloned())
+                .collect::<Vec<_>>()
+        };
+
+        originals
+            .into_iter()
+            .map(|setting| {
+                let result = run_sequence(&setting.restore_commands);
+                match result {
+                    Ok(()) => ActionResult {
+                        label: setting.label,
+                        ok: true,
+                        message: "restored original setting".to_string(),
+                    },
+                    Err(error) => ActionResult {
+                        label: setting.label,
+                        ok: false,
+                        message: format!("{error:#}"),
+                    },
+                }
+            })
+            .collect()
+    }
+
+    fn with_original_settings<T>(
+        &self,
+        f: impl FnOnce(&mut OriginalSettings) -> Result<T>,
+    ) -> Result<T> {
+        let mut settings = self.original_settings.lock().unwrap();
+        f(&mut settings)
+    }
+}
+
+impl OriginalSettings {
+    fn remember(
+        &mut self,
+        key: String,
+        label: String,
+        capture: impl FnOnce() -> Result<Vec<CommandSpec>>,
+    ) -> Result<()> {
+        if self.values.contains_key(&key) {
+            return Ok(());
+        }
+
+        let restore_commands = capture()?;
+        self.order.push(key.clone());
+        self.values.insert(
+            key,
+            OriginalSetting {
+                label,
+                restore_commands,
+            },
+        );
+        Ok(())
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn forget(&mut self, key: &str) {
+        self.values.remove(key);
+        self.order.retain(|stored_key| stored_key != key);
+    }
+}
+
+pub fn install_ctrlc_restore_handler(session: Arc<ActionSession>) -> Result<()> {
+    ctrlc::set_handler(move || {
+        log_restore_results(&session.restore_original_settings());
+        std::process::exit(130);
+    })
+    .context("failed to install Ctrl-C restore handler")
+}
+
+pub fn log_restore_results(results: &[ActionResult]) {
+    for result in results {
+        let status = if result.ok {
+            "restored"
+        } else {
+            "restore failed"
+        };
+        eprintln!("motional: {status}: {}: {}", result.label, result.message);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,11 +216,20 @@ impl Action {
 }
 
 pub fn execute_actions(actions: &[Action], dry_run: bool) -> Vec<ActionResult> {
+    let session = ActionSession::new();
+    execute_actions_with_session(actions, dry_run, &session)
+}
+
+pub fn execute_actions_with_session(
+    actions: &[Action],
+    dry_run: bool,
+    session: &ActionSession,
+) -> Vec<ActionResult> {
     actions
         .iter()
         .map(|action| {
             let label = action.label();
-            match execute_action(action, dry_run) {
+            match execute_action_with_session(action, dry_run, session) {
                 Ok(message) => ActionResult {
                     label,
                     ok: true,
@@ -123,6 +246,15 @@ pub fn execute_actions(actions: &[Action], dry_run: bool) -> Vec<ActionResult> {
 }
 
 pub fn execute_action(action: &Action, dry_run: bool) -> Result<String> {
+    let session = ActionSession::new();
+    execute_action_with_session(action, dry_run, &session)
+}
+
+pub fn execute_action_with_session(
+    action: &Action,
+    dry_run: bool,
+    session: &ActionSession,
+) -> Result<String> {
     if dry_run {
         return Ok("dry run".to_string());
     }
@@ -161,19 +293,19 @@ pub fn execute_action(action: &Action, dry_run: bool) -> Result<String> {
             Ok("local terminal users logout requested".to_string())
         }
         Action::DisableTimedScreenLock => {
-            disable_timed_screen_lock()?;
+            disable_timed_screen_lock(session)?;
             Ok("timed screen lock disabled".to_string())
         }
         Action::EnableTimedScreenLock => {
-            enable_timed_screen_lock()?;
+            enable_timed_screen_lock(session)?;
             Ok("timed screen lock enabled".to_string())
         }
         Action::DisableTimedSleep => {
-            disable_timed_sleep()?;
+            disable_timed_sleep(session)?;
             Ok("timed sleep disabled".to_string())
         }
         Action::EnableTimedSleep => {
-            enable_timed_sleep()?;
+            enable_timed_sleep(session)?;
             Ok("timed sleep enabled".to_string())
         }
     }
@@ -378,296 +510,542 @@ fn logout_local_terminal_users() -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-fn disable_timed_screen_lock() -> Result<()> {
-    run_candidates(&[
-        command(
-            "gsettings",
-            &[
-                "set",
-                "org.gnome.desktop.screensaver",
-                "lock-enabled",
-                "false",
-            ],
-        ),
-        command(
-            "kwriteconfig6",
-            &[
-                "--file",
-                "kscreenlockerrc",
-                "--group",
-                "Daemon",
-                "--key",
-                "Autolock",
-                "false",
-            ],
-        ),
-        command(
-            "kwriteconfig5",
-            &[
-                "--file",
-                "kscreenlockerrc",
-                "--group",
-                "Daemon",
-                "--key",
-                "Autolock",
-                "false",
-            ],
-        ),
-    ])
+fn disable_timed_screen_lock(session: &ActionSession) -> Result<()> {
+    set_linux_screen_lock(session, "false")
 }
 
 #[cfg(target_os = "linux")]
-fn enable_timed_screen_lock() -> Result<()> {
-    run_candidates(&[
-        command(
-            "gsettings",
-            &[
-                "set",
-                "org.gnome.desktop.screensaver",
-                "lock-enabled",
-                "true",
-            ],
-        ),
-        command(
-            "kwriteconfig6",
-            &[
-                "--file",
-                "kscreenlockerrc",
-                "--group",
-                "Daemon",
-                "--key",
-                "Autolock",
-                "true",
-            ],
-        ),
-        command(
-            "kwriteconfig5",
-            &[
-                "--file",
-                "kscreenlockerrc",
-                "--group",
-                "Daemon",
-                "--key",
-                "Autolock",
-                "true",
-            ],
-        ),
-    ])
+fn enable_timed_screen_lock(session: &ActionSession) -> Result<()> {
+    set_linux_screen_lock(session, "true")
 }
 
 #[cfg(target_os = "linux")]
-fn disable_timed_sleep() -> Result<()> {
-    run_sequence(&[
-        command(
-            "gsettings",
-            &[
-                "set",
-                "org.gnome.settings-daemon.plugins.power",
-                "sleep-inactive-ac-type",
-                "nothing",
-            ],
-        ),
-        command(
-            "gsettings",
-            &[
-                "set",
-                "org.gnome.settings-daemon.plugins.power",
-                "sleep-inactive-battery-type",
-                "nothing",
-            ],
-        ),
-    ])
+fn disable_timed_sleep(session: &ActionSession) -> Result<()> {
+    set_linux_sleep(session, "nothing")
 }
 
 #[cfg(target_os = "linux")]
-fn enable_timed_sleep() -> Result<()> {
-    run_sequence(&[
-        command(
+fn enable_timed_sleep(session: &ActionSession) -> Result<()> {
+    set_linux_sleep(session, "suspend")
+}
+
+#[cfg(target_os = "linux")]
+fn set_linux_screen_lock(session: &ActionSession, value: &str) -> Result<()> {
+    let mut errors = Vec::new();
+
+    match set_gsettings_tracked(
+        session,
+        "org.gnome.desktop.screensaver",
+        "lock-enabled",
+        value,
+    ) {
+        Ok(()) => return Ok(()),
+        Err(error) => errors.push(format!("{error:#}")),
+    }
+    match set_kde_config_tracked(
+        session,
+        "kreadconfig6",
+        "kwriteconfig6",
+        "kscreenlockerrc",
+        "Daemon",
+        "Autolock",
+        value,
+    ) {
+        Ok(()) => return Ok(()),
+        Err(error) => errors.push(format!("{error:#}")),
+    }
+    match set_kde_config_tracked(
+        session,
+        "kreadconfig5",
+        "kwriteconfig5",
+        "kscreenlockerrc",
+        "Daemon",
+        "Autolock",
+        value,
+    ) {
+        Ok(()) => return Ok(()),
+        Err(error) => errors.push(format!("{error:#}")),
+    }
+
+    bail!("no action command succeeded: {}", errors.join("; "))
+}
+
+#[cfg(target_os = "linux")]
+fn set_linux_sleep(session: &ActionSession, value: &str) -> Result<()> {
+    session.with_original_settings(|settings| {
+        set_gsettings_tracked_locked(
+            settings,
+            "org.gnome.settings-daemon.plugins.power",
+            "sleep-inactive-ac-type",
+            value,
+        )?;
+        set_gsettings_tracked_locked(
+            settings,
+            "org.gnome.settings-daemon.plugins.power",
+            "sleep-inactive-battery-type",
+            value,
+        )
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn set_gsettings_tracked(
+    session: &ActionSession,
+    schema: &str,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    session.with_original_settings(|settings| {
+        set_gsettings_tracked_locked(settings, schema, key, value)
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn set_gsettings_tracked_locked(
+    settings: &mut OriginalSettings,
+    schema: &str,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    let setting_key = format!("linux:gsettings:{schema}:{key}");
+    let label = format!("gsettings {schema} {key}");
+    settings.remember(setting_key, label, || {
+        let original = run_command_output("gsettings", &["get", schema, key])?;
+        Ok(vec![command(
             "gsettings",
-            &[
-                "set",
-                "org.gnome.settings-daemon.plugins.power",
-                "sleep-inactive-ac-type",
-                "suspend",
-            ],
-        ),
-        command(
-            "gsettings",
-            &[
-                "set",
-                "org.gnome.settings-daemon.plugins.power",
-                "sleep-inactive-battery-type",
-                "suspend",
-            ],
-        ),
-    ])
+            &["set", schema, key, original.trim()],
+        )])
+    })?;
+    run_command("gsettings", &["set", schema, key, value])
+}
+
+#[cfg(target_os = "linux")]
+fn set_kde_config_tracked(
+    session: &ActionSession,
+    read_program: &str,
+    write_program: &str,
+    file: &str,
+    group: &str,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    session.with_original_settings(|settings| {
+        let setting_key = format!("linux:kde:{write_program}:{file}:{group}:{key}");
+        let label = format!("{file} {group}.{key}");
+        settings.remember(setting_key, label, || {
+            let sentinel = "__MOTIONAL_UNSET__";
+            let original = run_command_output(
+                read_program,
+                &[
+                    "--file",
+                    file,
+                    "--group",
+                    group,
+                    "--key",
+                    key,
+                    "--default",
+                    sentinel,
+                ],
+            )?;
+            let original = original.trim();
+            if original == sentinel {
+                Ok(vec![command(
+                    write_program,
+                    &["--file", file, "--group", group, "--key", key, "--delete"],
+                )])
+            } else {
+                Ok(vec![command(
+                    write_program,
+                    &["--file", file, "--group", group, "--key", key, original],
+                )])
+            }
+        })?;
+        run_command(
+            write_program,
+            &["--file", file, "--group", group, "--key", key, value],
+        )
+    })
 }
 
 #[cfg(target_os = "macos")]
-fn disable_timed_screen_lock() -> Result<()> {
-    run_sequence(&[
-        command(
-            "/usr/bin/defaults",
-            &[
-                "-currentHost",
-                "write",
-                "com.apple.screensaver",
-                "idleTime",
-                "-int",
-                "0",
-            ],
-        ),
-        command(
-            "/usr/bin/defaults",
-            &[
-                "write",
-                "com.apple.screensaver",
-                "askForPassword",
-                "-int",
-                "0",
-            ],
-        ),
-    ])
+fn disable_timed_screen_lock(session: &ActionSession) -> Result<()> {
+    set_macos_screen_lock(session, "0", "0")
 }
 
 #[cfg(target_os = "macos")]
-fn enable_timed_screen_lock() -> Result<()> {
-    run_sequence(&[
-        command(
-            "/usr/bin/defaults",
-            &[
-                "-currentHost",
-                "write",
-                "com.apple.screensaver",
-                "idleTime",
-                "-int",
-                "300",
-            ],
-        ),
-        command(
-            "/usr/bin/defaults",
-            &[
-                "write",
-                "com.apple.screensaver",
-                "askForPassword",
-                "-int",
-                "1",
-            ],
-        ),
-    ])
+fn enable_timed_screen_lock(session: &ActionSession) -> Result<()> {
+    set_macos_screen_lock(session, "300", "1")
 }
 
 #[cfg(target_os = "macos")]
-fn disable_timed_sleep() -> Result<()> {
-    run_command("/usr/bin/pmset", &["-a", "sleep", "0"])
+fn disable_timed_sleep(session: &ActionSession) -> Result<()> {
+    set_macos_pmset_sleep(session, "0")
 }
 
 #[cfg(target_os = "macos")]
-fn enable_timed_sleep() -> Result<()> {
-    run_command("/usr/bin/pmset", &["-a", "sleep", "30"])
+fn enable_timed_sleep(session: &ActionSession) -> Result<()> {
+    set_macos_pmset_sleep(session, "30")
+}
+
+#[cfg(target_os = "macos")]
+fn set_macos_screen_lock(
+    session: &ActionSession,
+    idle_time: &str,
+    ask_for_password: &str,
+) -> Result<()> {
+    session.with_original_settings(|settings| {
+        set_macos_defaults_int_tracked(
+            settings,
+            true,
+            "com.apple.screensaver",
+            "idleTime",
+            idle_time,
+        )?;
+        set_macos_defaults_int_tracked(
+            settings,
+            false,
+            "com.apple.screensaver",
+            "askForPassword",
+            ask_for_password,
+        )
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn set_macos_defaults_int_tracked(
+    settings: &mut OriginalSettings,
+    current_host: bool,
+    domain: &str,
+    key: &str,
+    value: &str,
+) -> Result<()> {
+    let scope = if current_host {
+        "current-host"
+    } else {
+        "global"
+    };
+    let setting_key = format!("macos:defaults:{scope}:{domain}:{key}");
+    let label = format!("defaults {scope} {domain} {key}");
+    settings.remember(setting_key, label, || {
+        let read_args = if current_host {
+            vec![
+                "-currentHost".to_string(),
+                "read".to_string(),
+                domain.to_string(),
+                key.to_string(),
+            ]
+        } else {
+            vec!["read".to_string(), domain.to_string(), key.to_string()]
+        };
+
+        match run_command_output_owned("/usr/bin/defaults", &read_args) {
+            Ok(original) => Ok(vec![macos_defaults_write_command(
+                current_host,
+                domain,
+                key,
+                original.trim(),
+            )]),
+            Err(_) => Ok(vec![macos_defaults_delete_command(
+                current_host,
+                domain,
+                key,
+            )]),
+        }
+    })?;
+    run_command_spec(&macos_defaults_write_command(
+        current_host,
+        domain,
+        key,
+        value,
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_defaults_write_command(
+    current_host: bool,
+    domain: &str,
+    key: &str,
+    value: &str,
+) -> CommandSpec {
+    let mut args = Vec::new();
+    if current_host {
+        args.push("-currentHost".to_string());
+    }
+    args.extend([
+        "write".to_string(),
+        domain.to_string(),
+        key.to_string(),
+        "-int".to_string(),
+        value.to_string(),
+    ]);
+    program_command("/usr/bin/defaults", args)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_defaults_delete_command(current_host: bool, domain: &str, key: &str) -> CommandSpec {
+    let mut args = Vec::new();
+    if current_host {
+        args.push("-currentHost".to_string());
+    }
+    args.extend(["delete".to_string(), domain.to_string(), key.to_string()]);
+    program_command("/usr/bin/defaults", args)
+}
+
+#[cfg(target_os = "macos")]
+fn set_macos_pmset_sleep(session: &ActionSession, value: &str) -> Result<()> {
+    session.with_original_settings(|settings| {
+        let setting_key = "macos:pmset:sleep";
+        settings.remember(setting_key.to_string(), "pmset sleep".to_string(), || {
+            let output = run_command_output("/usr/bin/pmset", &["-g", "custom"])
+                .or_else(|_| run_command_output("/usr/bin/pmset", &["-g"]))?;
+            macos_pmset_sleep_restore_commands(&output)
+        })?;
+        match run_command("/usr/bin/pmset", &["-a", "sleep", value]) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                settings.forget(setting_key);
+                Err(error)
+            }
+        }
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_pmset_sleep_restore_commands(output: &str) -> Result<Vec<CommandSpec>> {
+    let mut current_profile = None;
+    let mut commands = Vec::new();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        current_profile = match trimmed {
+            "Battery Power:" => Some("-b"),
+            "AC Power:" => Some("-c"),
+            "UPS Power:" => Some("-u"),
+            _ => current_profile,
+        };
+
+        let parts = trimmed.split_whitespace().collect::<Vec<_>>();
+        if parts.first() == Some(&"sleep") {
+            let value = parts
+                .get(1)
+                .ok_or_else(|| anyhow!("pmset sleep line missing value"))?;
+            commands.push(command(
+                "/usr/bin/pmset",
+                &[current_profile.unwrap_or("-a"), "sleep", value],
+            ));
+        }
+    }
+
+    if commands.is_empty() {
+        bail!("pmset output did not include sleep settings");
+    }
+
+    Ok(commands)
 }
 
 #[cfg(target_os = "windows")]
-fn disable_timed_screen_lock() -> Result<()> {
-    run_sequence(&[
-        command(
+fn disable_timed_screen_lock(session: &ActionSession) -> Result<()> {
+    set_windows_screen_lock(session, "0", "0")
+}
+
+#[cfg(target_os = "windows")]
+fn enable_timed_screen_lock(session: &ActionSession) -> Result<()> {
+    set_windows_screen_lock(session, "1", "1")
+}
+
+#[cfg(target_os = "windows")]
+fn disable_timed_sleep(session: &ActionSession) -> Result<()> {
+    set_windows_sleep(session, "0", "0")
+}
+
+#[cfg(target_os = "windows")]
+fn enable_timed_sleep(session: &ActionSession) -> Result<()> {
+    set_windows_sleep(session, "30", "15")
+}
+
+#[cfg(target_os = "windows")]
+fn set_windows_screen_lock(
+    session: &ActionSession,
+    screen_save_active: &str,
+    screen_saver_is_secure: &str,
+) -> Result<()> {
+    session.with_original_settings(|settings| {
+        set_windows_registry_tracked(
+            settings,
+            r#"HKCU\Control Panel\Desktop"#,
+            "ScreenSaveActive",
+            "REG_SZ",
+            screen_save_active,
+        )?;
+        set_windows_registry_tracked(
+            settings,
+            r#"HKCU\Control Panel\Desktop"#,
+            "ScreenSaverIsSecure",
+            "REG_SZ",
+            screen_saver_is_secure,
+        )
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn set_windows_registry_tracked(
+    settings: &mut OriginalSettings,
+    path: &str,
+    value_name: &str,
+    value_type: &str,
+    value: &str,
+) -> Result<()> {
+    let setting_key = format!("windows:registry:{path}:{value_name}");
+    let label = format!("registry {path}\\{value_name}");
+    settings.remember(setting_key, label, || {
+        windows_registry_restore_commands(path, value_name)
+    })?;
+    run_command(
+        "reg.exe",
+        &[
+            "add", path, "/v", value_name, "/t", value_type, "/d", value, "/f",
+        ],
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn windows_registry_restore_commands(path: &str, value_name: &str) -> Result<Vec<CommandSpec>> {
+    match run_command_output("reg.exe", &["query", path, "/v", value_name]) {
+        Ok(output) => {
+            let (value_type, data) = parse_windows_registry_value(&output, value_name)
+                .ok_or_else(|| anyhow!("reg query output missing {value_name}"))?;
+            Ok(vec![command(
+                "reg.exe",
+                &[
+                    "add",
+                    path,
+                    "/v",
+                    value_name,
+                    "/t",
+                    &value_type,
+                    "/d",
+                    &data,
+                    "/f",
+                ],
+            )])
+        }
+        Err(_) => Ok(vec![command(
             "reg.exe",
+            &["delete", path, "/v", value_name, "/f"],
+        )]),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn parse_windows_registry_value(output: &str, value_name: &str) -> Option<(String, String)> {
+    for line in output.lines() {
+        let parts = line.split_whitespace().collect::<Vec<_>>();
+        if parts.len() >= 3 && parts[0].eq_ignore_ascii_case(value_name) {
+            return Some((parts[1].to_string(), parts[2..].join(" ")));
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn set_windows_sleep(session: &ActionSession, ac_minutes: &str, dc_minutes: &str) -> Result<()> {
+    session.with_original_settings(|settings| {
+        let setting_key = "windows:powercfg:standbyidle";
+        settings.remember(
+            setting_key.to_string(),
+            "powercfg standby idle".to_string(),
+            windows_powercfg_sleep_restore_commands,
+        )?;
+        let ac_command = command(
+            "powercfg.exe",
+            &["/change", "standby-timeout-ac", ac_minutes],
+        );
+        if let Err(error) = run_command_spec(&ac_command) {
+            settings.forget(setting_key);
+            return Err(error);
+        }
+
+        run_command(
+            "powercfg.exe",
+            &["/change", "standby-timeout-dc", dc_minutes],
+        )
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_powercfg_sleep_restore_commands() -> Result<Vec<CommandSpec>> {
+    let output = run_command_output(
+        "powercfg.exe",
+        &["/query", "SCHEME_CURRENT", "SUB_SLEEP", "STANDBYIDLE"],
+    )?;
+    let ac_seconds = parse_windows_powercfg_index(&output, "Current AC Power Setting Index")
+        .ok_or_else(|| anyhow!("powercfg output missing AC sleep setting"))?;
+    let dc_seconds = parse_windows_powercfg_index(&output, "Current DC Power Setting Index")
+        .ok_or_else(|| anyhow!("powercfg output missing DC sleep setting"))?;
+
+    Ok(vec![
+        command(
+            "powercfg.exe",
             &[
-                "add",
-                r#"HKCU\Control Panel\Desktop"#,
-                "/v",
-                "ScreenSaveActive",
-                "/t",
-                "REG_SZ",
-                "/d",
-                "0",
-                "/f",
+                "/setacvalueindex",
+                "SCHEME_CURRENT",
+                "SUB_SLEEP",
+                "STANDBYIDLE",
+                &ac_seconds.to_string(),
             ],
         ),
         command(
-            "reg.exe",
+            "powercfg.exe",
             &[
-                "add",
-                r#"HKCU\Control Panel\Desktop"#,
-                "/v",
-                "ScreenSaverIsSecure",
-                "/t",
-                "REG_SZ",
-                "/d",
-                "0",
-                "/f",
+                "/setdcvalueindex",
+                "SCHEME_CURRENT",
+                "SUB_SLEEP",
+                "STANDBYIDLE",
+                &dc_seconds.to_string(),
             ],
         ),
+        command("powercfg.exe", &["/setactive", "SCHEME_CURRENT"]),
     ])
 }
 
 #[cfg(target_os = "windows")]
-fn enable_timed_screen_lock() -> Result<()> {
-    run_sequence(&[
-        command(
-            "reg.exe",
-            &[
-                "add",
-                r#"HKCU\Control Panel\Desktop"#,
-                "/v",
-                "ScreenSaveActive",
-                "/t",
-                "REG_SZ",
-                "/d",
-                "1",
-                "/f",
-            ],
-        ),
-        command(
-            "reg.exe",
-            &[
-                "add",
-                r#"HKCU\Control Panel\Desktop"#,
-                "/v",
-                "ScreenSaverIsSecure",
-                "/t",
-                "REG_SZ",
-                "/d",
-                "1",
-                "/f",
-            ],
-        ),
-    ])
-}
+fn parse_windows_powercfg_index(output: &str, label: &str) -> Option<u64> {
+    output.lines().find_map(|line| {
+        let trimmed = line.trim();
+        let (_, value) = trimmed.split_once(':')?;
+        if !trimmed.starts_with(label) {
+            return None;
+        }
 
-#[cfg(target_os = "windows")]
-fn disable_timed_sleep() -> Result<()> {
-    run_sequence(&[
-        command("powercfg.exe", &["/change", "standby-timeout-ac", "0"]),
-        command("powercfg.exe", &["/change", "standby-timeout-dc", "0"]),
-    ])
-}
-
-#[cfg(target_os = "windows")]
-fn enable_timed_sleep() -> Result<()> {
-    run_sequence(&[
-        command("powercfg.exe", &["/change", "standby-timeout-ac", "30"]),
-        command("powercfg.exe", &["/change", "standby-timeout-dc", "15"]),
-    ])
+        let value = value.trim();
+        if let Some(hex) = value
+            .strip_prefix("0x")
+            .or_else(|| value.strip_prefix("0X"))
+        {
+            u64::from_str_radix(hex, 16).ok()
+        } else {
+            value.parse().ok()
+        }
+    })
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn disable_timed_screen_lock() -> Result<()> {
+fn disable_timed_screen_lock(_session: &ActionSession) -> Result<()> {
     bail!("Disable Timed Screen Lock is not implemented for this platform")
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn enable_timed_screen_lock() -> Result<()> {
+fn enable_timed_screen_lock(_session: &ActionSession) -> Result<()> {
     bail!("Enable Timed Screen Lock is not implemented for this platform")
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn disable_timed_sleep() -> Result<()> {
+fn disable_timed_sleep(_session: &ActionSession) -> Result<()> {
     bail!("Disable Timed Sleep is not implemented for this platform")
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-fn enable_timed_sleep() -> Result<()> {
+fn enable_timed_sleep(_session: &ActionSession) -> Result<()> {
     bail!("Enable Timed Sleep is not implemented for this platform")
 }
 
@@ -732,7 +1110,7 @@ fn press_key(_keystroke: &str) -> Result<()> {
     bail!("Key Press is not implemented for this platform")
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 enum CommandSpec {
     Program {
         program: String,
@@ -746,6 +1124,14 @@ fn command(program: &str, args: &[&str]) -> CommandSpec {
     CommandSpec::Program {
         program: program.to_string(),
         args: args.iter().map(|arg| arg.to_string()).collect(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn program_command(program: &str, args: Vec<String>) -> CommandSpec {
+    CommandSpec::Program {
+        program: program.to_string(),
+        args,
     }
 }
 
@@ -794,6 +1180,29 @@ fn run_command(program: &str, args: &[&str]) -> Result<()> {
         Ok(())
     } else {
         Err(anyhow!("{program} exited with {status}"))
+    }
+}
+
+fn run_command_output(program: &str, args: &[&str]) -> Result<String> {
+    let owned_args = args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+    run_command_output_owned(program, &owned_args)
+}
+
+fn run_command_output_owned(program: &str, args: &[String]) -> Result<String> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .with_context(|| format!("failed to spawn {program}"))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let detail = if stderr.is_empty() {
+            output.status.to_string()
+        } else {
+            format!("{}: {stderr}", output.status)
+        };
+        Err(anyhow!("{program} exited with {detail}"))
     }
 }
 
@@ -945,5 +1354,137 @@ mod tests {
     fn rest_api_error_message_omits_response_body() {
         let message = rest_api_error_message(reqwest::StatusCode::BAD_REQUEST);
         assert_eq!(message, "REST API returned 400 Bad Request");
+    }
+
+    #[test]
+    fn remembers_original_setting_once() {
+        let mut settings = OriginalSettings::default();
+        let mut captures = 0;
+
+        settings
+            .remember("setting".to_string(), "Setting".to_string(), || {
+                captures += 1;
+                Ok(vec![command("restore", &["first"])])
+            })
+            .unwrap();
+        settings
+            .remember("setting".to_string(), "Setting".to_string(), || {
+                captures += 1;
+                Ok(vec![command("restore", &["second"])])
+            })
+            .unwrap();
+
+        assert_eq!(captures, 1);
+        assert_eq!(settings.order, vec!["setting"]);
+        assert_eq!(settings.values["setting"].restore_commands.len(), 1);
+    }
+
+    #[test]
+    fn restore_without_captured_settings_is_empty() {
+        let session = ActionSession::new();
+        assert!(session.restore_original_settings().is_empty());
+    }
+
+    #[test]
+    #[ignore = "modifies timed lock and sleep OS settings before restoring them"]
+    fn real_os_config_actions_restore_original_settings() {
+        struct RestoreOnPanic<'a>(&'a ActionSession);
+
+        impl Drop for RestoreOnPanic<'_> {
+            fn drop(&mut self) {
+                let _ = self.0.restore_original_settings();
+            }
+        }
+
+        let session = ActionSession::new();
+        let _restore_on_panic = RestoreOnPanic(&session);
+        let mut succeeded = Vec::new();
+        let mut failed = Vec::new();
+
+        for action in [
+            Action::DisableTimedScreenLock,
+            Action::EnableTimedScreenLock,
+            Action::DisableTimedSleep,
+            Action::EnableTimedSleep,
+        ] {
+            match execute_action_with_session(&action, false, &session) {
+                Ok(_) => succeeded.push(action.label()),
+                Err(error) => failed.push(format!("{}: {error:#}", action.label())),
+            }
+        }
+
+        let restore_results = session.restore_original_settings();
+        assert!(
+            restore_results.iter().all(|result| result.ok),
+            "restore failed: {restore_results:?}"
+        );
+        assert!(
+            !succeeded.is_empty(),
+            "no OS config action succeeded: {}",
+            failed.join("; ")
+        );
+        if !failed.is_empty() {
+            eprintln!(
+                "OS config actions that did not succeed: {}",
+                failed.join("; ")
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parses_macos_pmset_sleep_profiles() {
+        let output = r#"
+Battery Power:
+ sleep                12
+AC Power:
+ sleep                34
+"#;
+
+        let commands = macos_pmset_sleep_restore_commands(output).unwrap();
+
+        assert_eq!(command_args(&commands[0]), &["-b", "sleep", "12"]);
+        assert_eq!(command_args(&commands[1]), &["-c", "sleep", "34"]);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn parses_windows_registry_query_value() {
+        let output = r#"
+HKEY_CURRENT_USER\Control Panel\Desktop
+    ScreenSaveActive    REG_SZ    1
+"#;
+
+        assert_eq!(
+            parse_windows_registry_value(output, "ScreenSaveActive"),
+            Some(("REG_SZ".to_string(), "1".to_string()))
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn parses_windows_powercfg_hex_indexes() {
+        let output = r#"
+    Current AC Power Setting Index: 0x0000000000000708
+    Current DC Power Setting Index: 0x0000000000000258
+"#;
+
+        assert_eq!(
+            parse_windows_powercfg_index(output, "Current AC Power Setting Index"),
+            Some(1800)
+        );
+        assert_eq!(
+            parse_windows_powercfg_index(output, "Current DC Power Setting Index"),
+            Some(600)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    fn command_args(command: &CommandSpec) -> Vec<&str> {
+        match command {
+            CommandSpec::Program { args, .. } => args.iter().map(String::as_str).collect(),
+            #[cfg(target_os = "linux")]
+            CommandSpec::Shell(_) => unreachable!(),
+        }
     }
 }

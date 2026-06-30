@@ -66,6 +66,8 @@ Each GUI server entry also supports connection-state actions. A typical resilien
 
 That lets Motional control lock and sleep while the service is reachable, then falls back to the operating system's normal delay-based behavior if the Motional server becomes unavailable.
 
+When a client changes timed screen lock or timed sleep settings, it records the original operating system values first and restores them when the client exits. The CLI also restores those values on Ctrl-C.
+
 Use the CLI to list sensors:
 
 ```sh

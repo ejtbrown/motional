@@ -1,9 +1,13 @@
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use motional_clients::actions::{execute_actions, parse_cli_action, Action, ActionTrigger};
+use motional_clients::actions::{
+    execute_actions_with_session, install_ctrlc_restore_handler, log_restore_results,
+    parse_cli_action, Action, ActionSession, ActionTrigger,
+};
 use motional_clients::msp::{MspConnection, MspEvent, SensorState};
 
 #[derive(Debug, Parser)]
@@ -102,20 +106,40 @@ fn get(args: GetArgs) -> Result<()> {
 fn watch(args: WatchArgs) -> Result<()> {
     let on_motion = parse_actions(&args.on_motion).context("invalid --on-motion action")?;
     let on_absence = parse_actions(&args.on_absence).context("invalid --on-absence action")?;
+    let action_session = Arc::new(ActionSession::new());
+    install_ctrlc_restore_handler(Arc::clone(&action_session))?;
+    let _restore_guard = RestoreOnDrop {
+        session: Arc::clone(&action_session),
+    };
 
     if args.poll_interval == 0 {
         bail!("--poll-interval must be greater than zero");
     }
 
     match args.mode {
-        WatchMode::Subscribe => watch_subscribe(args, on_motion, on_absence),
-        WatchMode::Poll => watch_poll(args, on_motion, on_absence),
+        WatchMode::Subscribe => watch_subscribe(args, on_motion, on_absence, action_session),
+        WatchMode::Poll => watch_poll(args, on_motion, on_absence, action_session),
     }
 }
 
-fn watch_subscribe(args: WatchArgs, on_motion: Vec<Action>, on_absence: Vec<Action>) -> Result<()> {
+struct RestoreOnDrop {
+    session: Arc<ActionSession>,
+}
+
+impl Drop for RestoreOnDrop {
+    fn drop(&mut self) {
+        log_restore_results(&self.session.restore_original_settings());
+    }
+}
+
+fn watch_subscribe(
+    args: WatchArgs,
+    on_motion: Vec<Action>,
+    on_absence: Vec<Action>,
+    action_session: Arc<ActionSession>,
+) -> Result<()> {
     loop {
-        match watch_subscribe_once(&args, &on_motion, &on_absence) {
+        match watch_subscribe_once(&args, &on_motion, &on_absence, &action_session) {
             Ok(()) => return Ok(()),
             Err(error) => {
                 eprintln!("motional-cli: {error:#}; reconnecting in 5s");
@@ -129,6 +153,7 @@ fn watch_subscribe_once(
     args: &WatchArgs,
     on_motion: &[Action],
     on_absence: &[Action],
+    action_session: &ActionSession,
 ) -> Result<()> {
     let mut connection = connect(&args.common, "motional-cli")?;
     let subscription_id = connection.subscribe(std::slice::from_ref(&args.sensor), true)?;
@@ -145,6 +170,7 @@ fn watch_subscribe_once(
                     on_motion,
                     on_absence,
                     args.dry_run,
+                    action_session,
                 );
             }
             MspEvent::ResyncRequired { .. } => {
@@ -156,6 +182,7 @@ fn watch_subscribe_once(
                         on_motion,
                         on_absence,
                         args.dry_run,
+                        action_session,
                     );
                 }
             }
@@ -164,7 +191,12 @@ fn watch_subscribe_once(
     }
 }
 
-fn watch_poll(args: WatchArgs, on_motion: Vec<Action>, on_absence: Vec<Action>) -> Result<()> {
+fn watch_poll(
+    args: WatchArgs,
+    on_motion: Vec<Action>,
+    on_absence: Vec<Action>,
+    action_session: Arc<ActionSession>,
+) -> Result<()> {
     let mut last_triggered: Option<bool> = None;
     loop {
         match connect(&args.common, "motional-cli")
@@ -179,6 +211,7 @@ fn watch_poll(args: WatchArgs, on_motion: Vec<Action>, on_absence: Vec<Action>) 
                         &on_motion,
                         &on_absence,
                         args.dry_run,
+                        &action_session,
                     );
                 }
             }
@@ -195,6 +228,7 @@ fn handle_state(
     on_motion: &[Action],
     on_absence: &[Action],
     dry_run: bool,
+    action_session: &ActionSession,
 ) {
     print_state(state);
 
@@ -218,7 +252,7 @@ fn handle_state(
         (ActionTrigger::Absence, on_absence)
     };
 
-    for result in execute_actions(actions, dry_run) {
+    for result in execute_actions_with_session(actions, dry_run, action_session) {
         if result.ok {
             eprintln!("{} action succeeded: {}", trigger.label(), result.label);
         } else {

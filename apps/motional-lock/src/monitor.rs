@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::actions::{execute_actions, ActionTrigger};
+use crate::actions::{execute_actions_with_session, ActionSession, ActionTrigger};
 use crate::config::ServerEntry;
 use crate::msp::{MspConnection, MspEvent, SensorDescription, SensorState};
 
@@ -55,10 +55,11 @@ pub fn spawn_entry_monitor(
     entry: ServerEntry,
     tx: Sender<MonitorEvent>,
     dry_run: bool,
+    action_session: Arc<ActionSession>,
 ) -> MonitorHandle {
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
-    let join = thread::spawn(move || monitor_loop(entry, tx, dry_run, thread_stop));
+    let join = thread::spawn(move || monitor_loop(entry, tx, dry_run, thread_stop, action_session));
 
     MonitorHandle {
         stop,
@@ -71,11 +72,19 @@ fn monitor_loop(
     tx: Sender<MonitorEvent>,
     dry_run: bool,
     stop: Arc<AtomicBool>,
+    action_session: Arc<ActionSession>,
 ) {
     let mut availability = ServerAvailability::Unknown;
 
     while !stop.load(Ordering::Relaxed) {
-        let result = monitor_once(&entry, &tx, dry_run, &stop, &mut availability);
+        let result = monitor_once(
+            &entry,
+            &tx,
+            dry_run,
+            &stop,
+            &mut availability,
+            &action_session,
+        );
         if let Err(error) = result {
             let _ = tx.send(MonitorEvent::Status {
                 entry_id: entry.id.clone(),
@@ -88,6 +97,7 @@ fn monitor_loop(
                     ActionTrigger::Disconnected,
                     &entry.on_disconnected,
                     dry_run,
+                    &action_session,
                 );
                 availability = ServerAvailability::Disconnected;
             }
@@ -109,6 +119,7 @@ fn monitor_once(
     dry_run: bool,
     stop: &AtomicBool,
     availability: &mut ServerAvailability,
+    action_session: &ActionSession,
 ) -> anyhow::Result<()> {
     let _ = tx.send(MonitorEvent::Status {
         entry_id: entry.id.clone(),
@@ -133,6 +144,7 @@ fn monitor_once(
             ActionTrigger::Connected,
             &entry.on_connected,
             dry_run,
+            action_session,
         );
         *availability = ServerAvailability::Connected;
     }
@@ -155,7 +167,14 @@ fn monitor_once(
                             } else {
                                 (ActionTrigger::Absence, &entry.on_absence)
                             };
-                            emit_action_results(entry, tx, trigger, actions, dry_run);
+                            emit_action_results(
+                                entry,
+                                tx,
+                                trigger,
+                                actions,
+                                dry_run,
+                                action_session,
+                            );
                         }
                     }
                     last_triggered = Some(triggered);
@@ -183,8 +202,9 @@ fn emit_action_results(
     trigger: ActionTrigger,
     actions: &[crate::actions::Action],
     dry_run: bool,
+    action_session: &ActionSession,
 ) {
-    for result in execute_actions(actions, dry_run) {
+    for result in execute_actions_with_session(actions, dry_run, action_session) {
         let _ = tx.send(MonitorEvent::Action {
             entry_id: entry.id.clone(),
             trigger,

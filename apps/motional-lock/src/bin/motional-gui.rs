@@ -1,12 +1,15 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use chrono::Local;
 use eframe::egui;
-use motional_clients::actions::{Action, ActionTrigger};
+use motional_clients::actions::{
+    install_ctrlc_restore_handler, log_restore_results, Action, ActionSession, ActionTrigger,
+};
 use motional_clients::config::{config_path, load_config, save_config, AppConfig, ServerEntry};
 use motional_clients::monitor::{spawn_entry_monitor, MonitorEvent, MonitorHandle};
 use motional_clients::msp::{MspConnection, SensorDescription, SensorState};
@@ -62,6 +65,7 @@ struct MotionalGuiApp {
     logs: VecDeque<String>,
     rest_editor: Option<RestEditor>,
     key_capture: Option<ActionTarget>,
+    action_session: Arc<ActionSession>,
     dry_run: bool,
     dirty: bool,
 }
@@ -97,6 +101,10 @@ impl MotionalGuiApp {
     fn new() -> Self {
         let path = config_path();
         let (tx, rx) = mpsc::channel();
+        let action_session = Arc::new(ActionSession::new());
+        if let Err(error) = install_ctrlc_restore_handler(Arc::clone(&action_session)) {
+            eprintln!("motional: failed to install Ctrl-C restore handler: {error:#}");
+        }
         let mut app = Self {
             config: load_config(&path).unwrap_or_default(),
             config_path: path,
@@ -109,6 +117,7 @@ impl MotionalGuiApp {
             logs: VecDeque::new(),
             rest_editor: None,
             key_capture: None,
+            action_session,
             dry_run: false,
             dirty: false,
         };
@@ -128,6 +137,7 @@ impl MotionalGuiApp {
                 entry.clone(),
                 self.tx.clone(),
                 self.dry_run,
+                Arc::clone(&self.action_session),
             ));
         }
     }
@@ -260,6 +270,7 @@ impl Drop for MotionalGuiApp {
         for monitor in self.monitors.drain(..) {
             monitor.stop();
         }
+        log_restore_results(&self.action_session.restore_original_settings());
     }
 }
 
