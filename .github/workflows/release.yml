@@ -50,6 +50,7 @@ jobs:
           mkdir -p "dist/${{ matrix.asset_name }}"
           cp target/release/motional-cli "dist/${{ matrix.asset_name }}/"
           cp target/release/motional-gui "dist/${{ matrix.asset_name }}/"
+          cp target/release/motional-service "dist/${{ matrix.asset_name }}/"
           cp ../../README.md ../../setup-linux.sh "dist/${{ matrix.asset_name }}/"
           tar -C dist -czf "dist/${{ matrix.archive_name }}" "${{ matrix.asset_name }}"
 
@@ -60,6 +61,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path "dist/${{ matrix.asset_name }}" | Out-Null
           Copy-Item "target/release/motional-cli.exe" "dist/${{ matrix.asset_name }}/"
           Copy-Item "target/release/motional-gui.exe" "dist/${{ matrix.asset_name }}/"
+          Copy-Item "target/release/motional-service.exe" "dist/${{ matrix.asset_name }}/"
           Copy-Item "../../README.md" "dist/${{ matrix.asset_name }}/"
           Compress-Archive -Path "dist/${{ matrix.asset_name }}" -DestinationPath "dist/${{ matrix.archive_name }}" -Force
 
@@ -71,6 +73,7 @@ jobs:
           mkdir -p "dist/${{ matrix.asset_name }}"
           cp -R "$app_dir" "dist/${{ matrix.asset_name }}/"
           cp target/release/motional-cli "dist/${{ matrix.asset_name }}/"
+          cp target/release/motional-service "dist/${{ matrix.asset_name }}/"
           cp ../../README.md "dist/${{ matrix.asset_name }}/"
           ditto -c -k --sequesterRsrc --keepParent "dist/${{ matrix.asset_name }}" "dist/${{ matrix.archive_name }}"
 

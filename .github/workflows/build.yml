@@ -54,4 +54,6 @@ jobs:
             apps/motional-lock/target/release/bundle/macos/Motional.app/**
             apps/motional-lock/target/release/motional-cli
             apps/motional-lock/target/release/motional-cli.exe
+            apps/motional-lock/target/release/motional-service
+            apps/motional-lock/target/release/motional-service.exe
           if-no-files-found: ignore

@@ -1,18 +1,19 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use chrono::Local;
 use eframe::egui;
-use motional_clients::actions::{
-    install_ctrlc_restore_handler, log_restore_results, Action, ActionSession, ActionTrigger,
-};
+use motional_clients::actions::{Action, ActionTrigger};
 use motional_clients::config::{config_path, load_config, save_config, AppConfig, ServerEntry};
-use motional_clients::monitor::{spawn_entry_monitor, MonitorEvent, MonitorHandle};
+use motional_clients::monitor::MonitorEvent;
 use motional_clients::msp::{MspConnection, SensorDescription, SensorState};
+use motional_clients::service_control::{
+    install_service, remove_service, restart_service, service_status, start_service, stop_service,
+    ServiceInstallOptions,
+};
 
 const APP_ID: &str = "com.ejtbrown.motional";
 const APP_NAME: &str = "Motional";
@@ -58,15 +59,12 @@ struct MotionalGuiApp {
     config_path: PathBuf,
     tx: Sender<MonitorEvent>,
     rx: Receiver<MonitorEvent>,
-    monitors: Vec<MonitorHandle>,
     sensors: HashMap<String, Vec<SensorDescription>>,
     states: HashMap<String, SensorState>,
     statuses: HashMap<String, String>,
     logs: VecDeque<String>,
     rest_editor: Option<RestEditor>,
     key_capture: Option<ActionTarget>,
-    action_session: Arc<ActionSession>,
-    dry_run: bool,
     dirty: bool,
 }
 
@@ -101,53 +99,30 @@ impl MotionalGuiApp {
     fn new() -> Self {
         let path = config_path();
         let (tx, rx) = mpsc::channel();
-        let action_session = Arc::new(ActionSession::new());
-        if let Err(error) = install_ctrlc_restore_handler(Arc::clone(&action_session)) {
-            eprintln!("motional: failed to install Ctrl-C restore handler: {error:#}");
-        }
-        let mut app = Self {
+        Self {
             config: load_config(&path).unwrap_or_default(),
             config_path: path,
             tx,
             rx,
-            monitors: Vec::new(),
             sensors: HashMap::new(),
             states: HashMap::new(),
             statuses: HashMap::new(),
             logs: VecDeque::new(),
             rest_editor: None,
             key_capture: None,
-            action_session,
-            dry_run: false,
             dirty: false,
-        };
-        app.restart_monitors();
-        app
-    }
-
-    fn restart_monitors(&mut self) {
-        for monitor in self.monitors.drain(..) {
-            monitor.stop();
-        }
-
-        for entry in self.config.entries.iter().filter(|entry| {
-            entry.enabled && !entry.address.trim().is_empty() && !entry.sensor.trim().is_empty()
-        }) {
-            self.monitors.push(spawn_entry_monitor(
-                entry.clone(),
-                self.tx.clone(),
-                self.dry_run,
-                Arc::clone(&self.action_session),
-            ));
         }
     }
 
-    fn save_and_restart(&mut self) {
+    fn save_and_restart_service(&mut self) {
         match save_config(&self.config_path, &self.config) {
             Ok(()) => {
                 self.dirty = false;
                 self.push_log(format!("saved {}", self.config_path.display()));
-                self.restart_monitors();
+                match restart_service() {
+                    Ok(message) => self.push_log(message),
+                    Err(error) => self.push_log(format!("service restart failed: {error:#}")),
+                }
             }
             Err(error) => self.push_log(format!("save failed: {error:#}")),
         }
@@ -263,14 +238,16 @@ impl MotionalGuiApp {
         };
         actions.get_mut(target.action_index)
     }
-}
 
-impl Drop for MotionalGuiApp {
-    fn drop(&mut self) {
-        for monitor in self.monitors.drain(..) {
-            monitor.stop();
+    fn run_service_command(
+        &mut self,
+        label: &str,
+        command: impl FnOnce() -> anyhow::Result<String>,
+    ) {
+        match command() {
+            Ok(message) => self.push_log(message),
+            Err(error) => self.push_log(format!("{label} failed: {error:#}")),
         }
-        log_restore_results(&self.action_session.restore_original_settings());
     }
 }
 
@@ -279,15 +256,40 @@ impl eframe::App for MotionalGuiApp {
         self.process_monitor_events();
 
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui.button("Add Server Entry").clicked() {
                     self.config.entries.push(ServerEntry::new());
                     self.dirty = true;
                 }
-                if ui.button("Save and Restart Monitoring").clicked() {
-                    self.save_and_restart();
+                if ui.button("Save and Restart Service").clicked() {
+                    self.save_and_restart_service();
                 }
-                ui.checkbox(&mut self.dry_run, "Dry run actions");
+                if ui.button("Install Service").clicked() {
+                    self.run_service_command("install service", || {
+                        install_service(&ServiceInstallOptions {
+                            service_binary: None,
+                            start: false,
+                        })
+                    });
+                }
+                if ui.button("Remove Service").clicked() {
+                    self.run_service_command("remove service", remove_service);
+                }
+                if ui.button("Start Service").clicked() {
+                    self.run_service_command("start service", start_service);
+                }
+                if ui.button("Stop Service").clicked() {
+                    self.run_service_command("stop service", stop_service);
+                }
+                if ui.button("Service Status").clicked() {
+                    match service_status() {
+                        Ok(status) => self.push_log(format!(
+                            "service installed={} running={}",
+                            status.installed, status.running
+                        )),
+                        Err(error) => self.push_log(format!("service status failed: {error:#}")),
+                    }
+                }
                 if self.dirty {
                     ui.label("Unsaved changes");
                 }

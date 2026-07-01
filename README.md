@@ -6,7 +6,7 @@ The project has two parts:
 
 - `hubitat/Motional.groovy`: a Hubitat app that exposes selected motion and presence sensors through token-scoped HTTP endpoints.
 - `motional-service-protocol.md`: a source-neutral TCP protocol for Motional service implementations.
-- `apps/motional-lock`: cross-platform GUI and CLI clients that speak Motional Service Protocol.
+- `apps/motional-lock`: cross-platform clients plus a per-user background service that speaks Motional Service Protocol.
 
 ## Hubitat App
 
@@ -42,13 +42,13 @@ Example response:
 
 Hubitat custom apps do not provide a supported way to bind an arbitrary listener port such as `7080` directly from Groovy app code. For broader VLAN exposure, prefer a separate Motional service that speaks `motional-service-protocol.md` on port `7080` and treats Hubitat as only one upstream sensor source.
 
-## Motional Clients
+## Motional Clients and Service
 
 Build locally:
 
 ```sh
 cd apps/motional-lock
-cargo build --release
+cargo build --release --bins
 ```
 
 Run the cross-platform GUI:
@@ -57,16 +57,49 @@ Run the cross-platform GUI:
 ./target/release/motional-gui
 ```
 
-The GUI lets users add any number of Motional server entries, choose one sensor per entry, and configure action lists for motion and absence transitions.
+Motional automation now runs in `motional-service`. The GUI and CLI are clients for configuring that service and controlling its per-user service registration.
+
+The GUI lets users add any number of Motional server entries, choose one sensor per entry, configure action lists for connection, motion, and absence transitions, and install, remove, start, stop, or restart the service.
 
 Each GUI server entry also supports connection-state actions. A typical resilient setup is:
 
 - On Server Connected: `Disable Timed Screen Lock`, `Disable Timed Sleep`
 - On Server Disconnected: `Enable Timed Screen Lock`, `Enable Timed Sleep`
 
-That lets Motional control lock and sleep while the service is reachable, then falls back to the operating system's normal delay-based behavior if the Motional server becomes unavailable.
+That lets Motional control lock and sleep while the upstream MSP server is reachable, then falls back to the operating system's normal delay-based behavior if the MSP server becomes unavailable.
 
-When a client changes timed screen lock or timed sleep settings, it records the original operating system values first and restores them when the client exits. The CLI also restores those values on Ctrl-C.
+When the service changes timed screen lock or timed sleep settings, it records the original operating system values first and restores them when the service exits. The foreground CLI watch mode still restores those values on Ctrl-C.
+
+Install and start the per-user service from the CLI:
+
+```sh
+./target/release/motional-cli service install --start
+```
+
+Control it later:
+
+```sh
+./target/release/motional-cli service status
+./target/release/motional-cli service restart
+./target/release/motional-cli service stop
+./target/release/motional-cli service remove
+```
+
+The service uses the same JSON configuration that the GUI edits. CLI config helpers are also available:
+
+```sh
+./target/release/motional-cli config path
+./target/release/motional-cli config show
+./target/release/motional-cli config write --file motional-config.json
+```
+
+Service installation is intentionally per-user:
+
+- Linux: `systemd --user` unit.
+- macOS: LaunchAgent.
+- Windows: logon Scheduled Task.
+
+This keeps desktop automation in the logged-in user's session instead of a privileged system account.
 
 Use the CLI to list sensors:
 

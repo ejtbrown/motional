@@ -41,7 +41,9 @@ pub struct MonitorHandle {
 impl MonitorHandle {
     pub fn stop(mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        let _ = self.join.take();
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
     }
 }
 

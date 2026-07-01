@@ -5,6 +5,7 @@ APP_NAME="Motional"
 APP_ID="com.ejtbrown.motional"
 BIN_NAME="motional-gui"
 INSTALL_BIN="/usr/bin/${BIN_NAME}"
+INSTALL_BINS=("motional-gui" "motional-cli" "motional-service")
 DESKTOP_FILE="/usr/share/applications/${APP_ID}.desktop"
 OLD_DESKTOP_FILE="/usr/share/applications/motional-gui.desktop"
 ICON_NAME="${APP_ID}"
@@ -14,7 +15,6 @@ PIXMAP_ICON_FILE="/usr/share/pixmaps/${ICON_NAME}.png"
 OLD_PIXMAP_ICON_FILE="/usr/share/pixmaps/motional-gui.png"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLIENT_DIR="${REPO_ROOT}/apps/motional-lock"
-SOURCE_BIN="${CLIENT_DIR}/target/release/${BIN_NAME}"
 ICON_SOURCE="${CLIENT_DIR}/assets/motional-icon.png"
 
 if [[ "$(uname -s)" != "Linux" ]]; then
@@ -28,18 +28,27 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 1
 fi
 
-if [[ ! -x "${SOURCE_BIN}" ]]; then
+missing_bin=false
+for install_bin in "${INSTALL_BINS[@]}"; do
+  if [[ ! -x "${CLIENT_DIR}/target/release/${install_bin}" ]]; then
+    missing_bin=true
+  fi
+done
+
+if [[ "${missing_bin}" == true ]]; then
   if ! command -v cargo >/dev/null 2>&1; then
-    echo "cargo is required to build ${BIN_NAME}, and ${SOURCE_BIN} does not exist." >&2
+    echo "cargo is required to build Motional binaries." >&2
     exit 1
   fi
 
-  echo "Building ${BIN_NAME}..."
-  cargo build --release --bin "${BIN_NAME}" --manifest-path "${CLIENT_DIR}/Cargo.toml"
+  echo "Building Motional binaries..."
+  cargo build --release --bins --manifest-path "${CLIENT_DIR}/Cargo.toml"
 fi
 
-echo "Installing ${BIN_NAME} to ${INSTALL_BIN}..."
-install -D -m 0755 "${SOURCE_BIN}" "${INSTALL_BIN}"
+for install_bin in "${INSTALL_BINS[@]}"; do
+  echo "Installing ${install_bin} to /usr/bin/${install_bin}..."
+  install -D -m 0755 "${CLIENT_DIR}/target/release/${install_bin}" "/usr/bin/${install_bin}"
+done
 
 if [[ ! -f "${ICON_SOURCE}" ]]; then
   echo "Icon file not found: ${ICON_SOURCE}" >&2

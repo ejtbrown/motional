@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -8,7 +9,12 @@ use motional_clients::actions::{
     execute_actions_with_session, install_ctrlc_restore_handler, log_restore_results,
     parse_cli_action, Action, ActionSession, ActionTrigger,
 };
+use motional_clients::config::{config_path, load_config, save_config, AppConfig};
 use motional_clients::msp::{MspConnection, MspEvent, SensorState};
+use motional_clients::service_control::{
+    install_service, remove_service, restart_service, service_status, start_service, stop_service,
+    ServiceInstallOptions,
+};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "CLI client for Motional Service Protocol")]
@@ -22,6 +28,8 @@ enum Command {
     List(CommonArgs),
     Get(GetArgs),
     Watch(WatchArgs),
+    Service(ServiceArgs),
+    Config(ConfigArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -75,12 +83,58 @@ enum WatchMode {
     Poll,
 }
 
+#[derive(Debug, Parser)]
+struct ServiceArgs {
+    #[command(subcommand)]
+    command: ServiceCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceCommand {
+    Install(ServiceInstallArgs),
+    Remove,
+    Start,
+    Stop,
+    Restart,
+    Status,
+}
+
+#[derive(Debug, Parser)]
+struct ServiceInstallArgs {
+    #[arg(long)]
+    service_binary: Option<PathBuf>,
+
+    #[arg(long)]
+    start: bool,
+}
+
+#[derive(Debug, Parser)]
+struct ConfigArgs {
+    #[command(subcommand)]
+    command: ConfigCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    Path,
+    Show,
+    Write(ConfigWriteArgs),
+}
+
+#[derive(Debug, Parser)]
+struct ConfigWriteArgs {
+    #[arg(long)]
+    file: PathBuf,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::List(args) => list(args),
         Command::Get(args) => get(args),
         Command::Watch(args) => watch(args),
+        Command::Service(args) => service(args),
+        Command::Config(args) => config(args),
     }
 }
 
@@ -288,4 +342,47 @@ fn connect(args: &CommonArgs, client_name: &str) -> Result<MspConnection> {
 
 fn parse_actions(specs: &[String]) -> Result<Vec<Action>> {
     specs.iter().map(|spec| parse_cli_action(spec)).collect()
+}
+
+fn service(args: ServiceArgs) -> Result<()> {
+    match args.command {
+        ServiceCommand::Install(args) => {
+            let message = install_service(&ServiceInstallOptions {
+                service_binary: args.service_binary,
+                start: args.start,
+            })?;
+            println!("{message}");
+        }
+        ServiceCommand::Remove => println!("{}", remove_service()?),
+        ServiceCommand::Start => println!("{}", start_service()?),
+        ServiceCommand::Stop => println!("{}", stop_service()?),
+        ServiceCommand::Restart => println!("{}", restart_service()?),
+        ServiceCommand::Status => {
+            let status = service_status()?;
+            println!("installed={}", status.installed);
+            println!("running={}", status.running);
+            println!("{}", status.detail);
+        }
+    }
+    Ok(())
+}
+
+fn config(args: ConfigArgs) -> Result<()> {
+    let path = config_path();
+    match args.command {
+        ConfigCommand::Path => println!("{}", path.display()),
+        ConfigCommand::Show => {
+            let config = load_config(&path)?;
+            println!("{}", serde_json::to_string_pretty(&config)?);
+        }
+        ConfigCommand::Write(args) => {
+            let text = std::fs::read_to_string(&args.file)
+                .with_context(|| format!("failed to read {}", args.file.display()))?;
+            let config: AppConfig = serde_json::from_str(&text)
+                .with_context(|| format!("failed to parse {}", args.file.display()))?;
+            save_config(&path, &config)?;
+            println!("wrote {}", path.display());
+        }
+    }
+    Ok(())
 }
