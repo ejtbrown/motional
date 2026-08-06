@@ -767,3 +767,14 @@ fn key_name(key: egui::Key) -> String {
         _ => format!("{key:?}").to_uppercase(),
     }
 }
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    #[test]
+    fn windows_wgpu_includes_dx12_backend() {
+        assert!(
+            wgpu::Instance::enabled_backend_features().contains(wgpu::Backends::DX12),
+            "the Windows GUI must compile the WGPU DX12 backend"
+        );
+    }
+}
