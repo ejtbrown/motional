@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use chrono::Local;
 use eframe::egui;
-use motional_clients::actions::{Action, ActionTrigger};
+use motional_clients::actions::{Action, ActionTrigger, MediaCommand};
 use motional_clients::config::{config_path, load_config, save_config, AppConfig, ServerEntry};
 use motional_clients::monitor::MonitorEvent;
 use motional_clients::msp::{MspConnection, SensorDescription, SensorState};
@@ -650,6 +650,24 @@ fn render_action_section(
                         });
                     }
                 }
+                Action::MediaControl { command } => {
+                    egui::ComboBox::from_id_salt(format!(
+                        "media-command-{entry_index}-{}-{action_index}",
+                        target_base.trigger.label(),
+                        entry_index = target_base.entry_index
+                    ))
+                    .selected_text(command.label())
+                    .show_ui(ui, |ui| {
+                        for option in MediaCommand::ALL {
+                            if ui
+                                .selectable_value(command, option, option.label())
+                                .changed()
+                            {
+                                *state.dirty = true;
+                            }
+                        }
+                    });
+                }
                 Action::RestApiCall { method, url, .. } => {
                     let text = if url.is_empty() {
                         "Edit".to_string()
@@ -704,6 +722,12 @@ fn gui_action_templates() -> Vec<(&'static str, Action)> {
             "Key Press",
             Action::KeyPress {
                 keystroke: String::new(),
+            },
+        ),
+        (
+            "Media Control",
+            Action::MediaControl {
+                command: MediaCommand::Play,
             },
         ),
         (

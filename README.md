@@ -131,9 +131,28 @@ CLI action specs:
 - `enable-timed-screen-lock`
 - `disable-timed-sleep`
 - `enable-timed-sleep`
+- `media-play`
+- `media-pause`
+- `media-mute`
+- `media-unmute`
+- `media-next`
+- `media-previous`
 - `rest|METHOD|URL|BODY`
 - `rest|METHOD|URL|@/path/to/body-file`
 
 Linux also supports `logout-local-terminal-users`.
 
-The GUI action set includes Lock Screen, Unlock Screen, Power Off Display, Power On Display, Shut Down System, Key Press, and REST API Call. Unlock Screen is only available where the operating system exposes a safe unlock command; macOS and Windows intentionally report it as unsupported.
+The GUI action set includes Lock Screen, Unlock Screen, Power Off Display, Power On Display, Shut Down System, Key Press, Media Control, and REST API Call. Media Control supports Play, Pause, Mute, Unmute, Next, and Previous. Unlock Screen is only available where the operating system exposes a safe unlock command; macOS and Windows intentionally report it as unsupported.
+
+Media Control actions use this JSON representation in the shared configuration:
+
+```json
+{
+  "type": "media_control",
+  "command": "pause"
+}
+```
+
+Valid `command` values are `play`, `pause`, `mute`, `unmute`, `next`, and `previous`.
+
+On Linux, playback commands prefer `playerctl` and fall back to `xdotool`; mute commands try `wpctl`, `pactl`, then `amixer`. Install at least one applicable command-line backend. macOS sends playback commands to the active system media client and controls output mute directly. Windows uses native application commands and the Core Audio endpoint API.

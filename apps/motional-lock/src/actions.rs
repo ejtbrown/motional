@@ -17,6 +17,9 @@ pub enum Action {
     KeyPress {
         keystroke: String,
     },
+    MediaControl {
+        command: MediaCommand,
+    },
     RestApiCall {
         method: String,
         url: String,
@@ -27,6 +30,39 @@ pub enum Action {
     EnableTimedScreenLock,
     DisableTimedSleep,
     EnableTimedSleep,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaCommand {
+    Play,
+    Pause,
+    Mute,
+    Unmute,
+    Next,
+    Previous,
+}
+
+impl MediaCommand {
+    pub const ALL: [Self; 6] = [
+        Self::Play,
+        Self::Pause,
+        Self::Mute,
+        Self::Unmute,
+        Self::Next,
+        Self::Previous,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Play => "Play",
+            Self::Pause => "Pause",
+            Self::Mute => "Mute",
+            Self::Unmute => "Unmute",
+            Self::Next => "Next",
+            Self::Previous => "Previous",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -182,6 +218,9 @@ impl Action {
                     format!("Key Press ({keystroke})")
                 }
             }
+            Self::MediaControl { command } => {
+                format!("Media Control ({})", command.label())
+            }
             Self::RestApiCall { method, url, .. } => {
                 if url.is_empty() {
                     "REST API Call".to_string()
@@ -205,6 +244,7 @@ impl Action {
             Self::PowerOnDisplay => "Power On Display",
             Self::ShutDownSystem => "Shut Down System",
             Self::KeyPress { .. } => "Key Press",
+            Self::MediaControl { .. } => "Media Control",
             Self::RestApiCall { .. } => "REST API Call",
             Self::LogoutLocalTerminalUsers => "Logout Local Terminal Users",
             Self::DisableTimedScreenLock => "Disable Timed Screen Lock",
@@ -284,6 +324,10 @@ pub fn execute_action_with_session(
             press_key(keystroke)?;
             Ok(format!("key press requested: {keystroke}"))
         }
+        Action::MediaControl { command } => {
+            media_control(*command)?;
+            Ok(format!("media control requested: {}", command.label()))
+        }
         Action::RestApiCall { method, url, body } => {
             rest_api_call(method, url, body)?;
             Ok(format!("REST API call completed: {method} {url}"))
@@ -321,9 +365,27 @@ pub fn parse_cli_action(spec: &str) -> Result<Action> {
         "enable-timed-screen-lock" => Ok(Action::EnableTimedScreenLock),
         "disable-timed-sleep" => Ok(Action::DisableTimedSleep),
         "enable-timed-sleep" => Ok(Action::EnableTimedSleep),
+        "media-play" => Ok(Action::MediaControl {
+            command: MediaCommand::Play,
+        }),
+        "media-pause" => Ok(Action::MediaControl {
+            command: MediaCommand::Pause,
+        }),
+        "media-mute" => Ok(Action::MediaControl {
+            command: MediaCommand::Mute,
+        }),
+        "media-unmute" => Ok(Action::MediaControl {
+            command: MediaCommand::Unmute,
+        }),
+        "media-next" => Ok(Action::MediaControl {
+            command: MediaCommand::Next,
+        }),
+        "media-previous" => Ok(Action::MediaControl {
+            command: MediaCommand::Previous,
+        }),
         _ if spec.starts_with("rest|") => parse_rest_action(spec),
         _ => bail!(
-            "unknown action {spec}; use logout-local-terminal-users, power-off-display, power-on-display, shut-down-system, disable-timed-screen-lock, enable-timed-screen-lock, disable-timed-sleep, enable-timed-sleep, or rest|METHOD|URL|BODY"
+            "unknown action {spec}; use logout-local-terminal-users, power-off-display, power-on-display, shut-down-system, disable-timed-screen-lock, enable-timed-screen-lock, disable-timed-sleep, enable-timed-sleep, media-play, media-pause, media-mute, media-unmute, media-next, media-previous, or rest|METHOD|URL|BODY"
         ),
     }
 }
@@ -385,6 +447,187 @@ fn rest_api_call(method: &str, url: &str, body: &str) -> Result<()> {
 
 fn rest_api_error_message(status: reqwest::StatusCode) -> String {
     format!("REST API returned {status}")
+}
+
+#[cfg(target_os = "linux")]
+fn media_control(media_command: MediaCommand) -> Result<()> {
+    match media_command {
+        MediaCommand::Play => run_candidates(&[
+            command("playerctl", &["play"]),
+            command("xdotool", &["key", "XF86AudioPlay"]),
+        ]),
+        MediaCommand::Pause => run_candidates(&[
+            command("playerctl", &["pause"]),
+            command("xdotool", &["key", "XF86AudioPause"]),
+        ]),
+        MediaCommand::Next => run_candidates(&[
+            command("playerctl", &["next"]),
+            command("xdotool", &["key", "XF86AudioNext"]),
+        ]),
+        MediaCommand::Previous => run_candidates(&[
+            command("playerctl", &["previous"]),
+            command("xdotool", &["key", "XF86AudioPrev"]),
+        ]),
+        MediaCommand::Mute => set_linux_output_mute(true),
+        MediaCommand::Unmute => set_linux_output_mute(false),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn set_linux_output_mute(muted: bool) -> Result<()> {
+    let value = if muted { "1" } else { "0" };
+    let amixer_value = if muted { "mute" } else { "unmute" };
+    run_candidates(&[
+        command("wpctl", &["set-mute", "@DEFAULT_AUDIO_SINK@", value]),
+        command("pactl", &["set-sink-mute", "@DEFAULT_SINK@", value]),
+        command("amixer", &["-q", "set", "Master", amixer_value]),
+    ])
+}
+
+#[cfg(target_os = "macos")]
+fn media_control(media_command: MediaCommand) -> Result<()> {
+    match media_command {
+        MediaCommand::Mute | MediaCommand::Unmute => {
+            let muted = matches!(media_command, MediaCommand::Mute);
+            run_command(
+                "/usr/bin/osascript",
+                &[
+                    "-e",
+                    if muted {
+                        "set volume output muted true"
+                    } else {
+                        "set volume output muted false"
+                    },
+                ],
+            )
+        }
+        MediaCommand::Play | MediaCommand::Pause | MediaCommand::Next | MediaCommand::Previous => {
+            send_macos_media_remote_command(media_command)
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn send_macos_media_remote_command(media_command: MediaCommand) -> Result<()> {
+    use std::ffi::{c_char, c_int, c_void};
+
+    const FRAMEWORK: &[u8] =
+        b"/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote\0";
+    const SYMBOL: &[u8] = b"MRMediaRemoteSendCommand\0";
+    const RTLD_LAZY: c_int = 0x1;
+
+    unsafe extern "C" {
+        fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+        fn dlclose(handle: *mut c_void) -> c_int;
+    }
+
+    type SendCommand = unsafe extern "C" fn(i32, *const c_void) -> u8;
+
+    let command = match media_command {
+        MediaCommand::Play => 0,
+        MediaCommand::Pause => 1,
+        MediaCommand::Next => 4,
+        MediaCommand::Previous => 5,
+        MediaCommand::Mute | MediaCommand::Unmute => unreachable!(),
+    };
+
+    // MediaRemote is the system framework used by macOS media keys. It is
+    // loaded dynamically so Motional still starts if Apple moves or removes it.
+    let handle = unsafe { dlopen(FRAMEWORK.as_ptr().cast(), RTLD_LAZY) };
+    if handle.is_null() {
+        bail!("failed to load the macOS MediaRemote framework");
+    }
+
+    let symbol = unsafe { dlsym(handle, SYMBOL.as_ptr().cast()) };
+    if symbol.is_null() {
+        unsafe {
+            dlclose(handle);
+        }
+        bail!("macOS MediaRemote does not provide MRMediaRemoteSendCommand");
+    }
+
+    let send_command: SendCommand = unsafe { std::mem::transmute(symbol) };
+    let sent = unsafe { send_command(command, std::ptr::null()) } != 0;
+    unsafe {
+        dlclose(handle);
+    }
+
+    if sent {
+        Ok(())
+    } else {
+        bail!("macOS rejected the {} media command", media_command.label())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn media_control(media_command: MediaCommand) -> Result<()> {
+    match media_command {
+        MediaCommand::Mute => set_windows_output_mute(true),
+        MediaCommand::Unmute => set_windows_output_mute(false),
+        MediaCommand::Play | MediaCommand::Pause | MediaCommand::Next | MediaCommand::Previous => {
+            send_windows_app_command(media_command)
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn send_windows_app_command(media_command: MediaCommand) -> Result<()> {
+    use windows::Win32::Foundation::LPARAM;
+    use windows::Win32::UI::WindowsAndMessaging::{SendMessageW, HWND_BROADCAST, WM_APPCOMMAND};
+
+    let command = windows_app_command_code(media_command);
+    unsafe {
+        SendMessageW(
+            HWND_BROADCAST,
+            WM_APPCOMMAND,
+            None,
+            Some(LPARAM((command as isize) << 16)),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_app_command_code(media_command: MediaCommand) -> u32 {
+    match media_command {
+        MediaCommand::Play => 46,
+        MediaCommand::Pause => 47,
+        MediaCommand::Next => 11,
+        MediaCommand::Previous => 12,
+        MediaCommand::Mute | MediaCommand::Unmute => unreachable!(),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn set_windows_output_mute(muted: bool) -> Result<()> {
+    use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
+    use windows::Win32::Media::Audio::{
+        eConsole, eRender, IMMDeviceEnumerator, MMDeviceEnumerator,
+    };
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
+    };
+
+    unsafe {
+        let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let result = (|| -> windows::core::Result<()> {
+            let enumerator: IMMDeviceEnumerator =
+                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+            let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
+            let endpoint: IAudioEndpointVolume = device.Activate(CLSCTX_ALL, None)?;
+            endpoint.SetMute(muted, std::ptr::null())
+        })();
+        if initialized {
+            CoUninitialize();
+        }
+        result.map_err(|error| anyhow!("failed to set Windows output mute state: {error}"))
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn media_control(_media_command: MediaCommand) -> Result<()> {
+    bail!("Media Control is not implemented for this platform")
 }
 
 #[cfg(target_os = "linux")]
@@ -1346,6 +1589,46 @@ mod tests {
                 method: "POST".to_string(),
                 url: "http://example.local/hook".to_string(),
                 body: "{\"ok\":true}".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn serializes_media_control_action() {
+        let action = Action::MediaControl {
+            command: MediaCommand::Pause,
+        };
+        assert_eq!(
+            serde_json::to_value(&action).unwrap(),
+            serde_json::json!({
+                "type": "media_control",
+                "command": "pause"
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<Action>(serde_json::json!({
+                "type": "media_control",
+                "command": "previous"
+            }))
+            .unwrap(),
+            Action::MediaControl {
+                command: MediaCommand::Previous
+            }
+        );
+    }
+
+    #[test]
+    fn parses_media_cli_actions() {
+        assert_eq!(
+            parse_cli_action("media-play").unwrap(),
+            Action::MediaControl {
+                command: MediaCommand::Play
+            }
+        );
+        assert_eq!(
+            parse_cli_action("media-unmute").unwrap(),
+            Action::MediaControl {
+                command: MediaCommand::Unmute
             }
         );
     }
