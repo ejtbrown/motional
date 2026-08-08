@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use reqwest::blocking::Client;
@@ -632,7 +634,42 @@ fn media_control(_media_command: MediaCommand) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn lock_screen() -> Result<()> {
+    request_linux_screen_lock()?;
+
+    match wait_for_linux_screen_lock(Duration::from_secs(1)) {
+        LinuxScreenLockState::Active | LinuxScreenLockState::Unavailable => Ok(()),
+        LinuxScreenLockState::Inactive => {
+            release_linux_application_grab().context(
+                "GNOME remained unlocked and the active application's keyboard grab could not be released",
+            )?;
+            request_linux_screen_lock()?;
+
+            match wait_for_linux_screen_lock(Duration::from_secs(2)) {
+                LinuxScreenLockState::Active => Ok(()),
+                LinuxScreenLockState::Inactive => bail!(
+                    "GNOME remained unlocked after application focus was revoked and the lock was retried"
+                ),
+                LinuxScreenLockState::Unavailable => bail!(
+                    "could not verify that GNOME locked after releasing the active application's keyboard grab"
+                ),
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn request_linux_screen_lock() -> Result<()> {
     run_candidates(&[
+        command(
+            "gdbus",
+            &[
+                "call",
+                "--session",
+                "--dest=org.gnome.ScreenSaver",
+                "--object-path=/org/gnome/ScreenSaver",
+                "--method=org.gnome.ScreenSaver.Lock",
+            ],
+        ),
         command("loginctl", &["lock-session"]),
         command("xdg-screensaver", &["lock"]),
         command("gnome-screensaver-command", &["-l"]),
@@ -651,6 +688,197 @@ fn lock_screen() -> Result<()> {
             ],
         ),
     ])
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinuxScreenLockState {
+    Active,
+    Inactive,
+    Unavailable,
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_linux_screen_lock(timeout: Duration) -> LinuxScreenLockState {
+    let started = Instant::now();
+    loop {
+        let state = linux_screen_lock_state();
+        if state != LinuxScreenLockState::Inactive || started.elapsed() >= timeout {
+            return state;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_screen_lock_state() -> LinuxScreenLockState {
+    let mut observed_inactive = false;
+    for (program, args) in [
+        (
+            "gdbus",
+            vec![
+                "call",
+                "--session",
+                "--dest=org.gnome.ScreenSaver",
+                "--object-path=/org/gnome/ScreenSaver",
+                "--method=org.gnome.ScreenSaver.GetActive",
+            ],
+        ),
+        (
+            "dbus-send",
+            vec![
+                "--session",
+                "--print-reply",
+                "--dest=org.gnome.ScreenSaver",
+                "/org/gnome/ScreenSaver",
+                "org.gnome.ScreenSaver.GetActive",
+            ],
+        ),
+    ] {
+        if let Ok(output) = run_command_output(program, &args) {
+            match parse_linux_lock_active(&output) {
+                Some(true) => return LinuxScreenLockState::Active,
+                Some(false) => observed_inactive = true,
+                None => {}
+            }
+        }
+    }
+
+    // A true LockedHint is useful confirmation, but false is not proof that a
+    // non-GNOME desktop failed: not every session implementation maintains it.
+    let session_id = std::env::var("XDG_SESSION_ID").unwrap_or_else(|_| "self".to_string());
+    if let Ok(output) = run_command_output(
+        "loginctl",
+        &[
+            "show-session",
+            &session_id,
+            "--property=LockedHint",
+            "--value",
+        ],
+    ) {
+        if parse_linux_lock_active(&output) == Some(true) {
+            return LinuxScreenLockState::Active;
+        }
+    }
+
+    if observed_inactive {
+        LinuxScreenLockState::Inactive
+    } else {
+        LinuxScreenLockState::Unavailable
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_lock_active(output: &str) -> Option<bool> {
+    output
+        .split(|character: char| !character.is_ascii_alphabetic())
+        .find_map(|word| match word {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        })
+}
+
+#[cfg(target_os = "linux")]
+fn release_linux_application_grab() -> Result<()> {
+    let mut errors = Vec::new();
+
+    match minimize_active_x11_window() {
+        Ok(()) => return Ok(()),
+        Err(error) => errors.push(format!("X11 window minimization failed: {error:#}")),
+    }
+
+    match run_command(
+        "gdbus",
+        &[
+            "call",
+            "--session",
+            "--dest=org.gnome.Shell",
+            "--object-path=/org/gnome/Shell",
+            "--method=org.freedesktop.DBus.Properties.Set",
+            "org.gnome.Shell",
+            "OverviewActive",
+            "<true>",
+        ],
+    ) {
+        Ok(()) => {
+            std::thread::sleep(Duration::from_millis(200));
+            Ok(())
+        }
+        Err(error) => {
+            errors.push(format!("GNOME overview focus request failed: {error:#}"));
+            bail!("{}", errors.join("; "))
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn minimize_active_x11_window() -> Result<()> {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{
+        AtomEnum, ClientMessageData, ClientMessageEvent, ConnectionExt, EventMask, MapState,
+    };
+
+    let (connection, screen_number) =
+        x11rb::connect(None).context("failed to connect to the X11 display")?;
+    let root = connection
+        .setup()
+        .roots
+        .get(screen_number)
+        .ok_or_else(|| anyhow!("X11 display has no default screen"))?
+        .root;
+    let active_window_atom = connection
+        .intern_atom(false, b"_NET_ACTIVE_WINDOW")?
+        .reply()
+        .context("failed to resolve the X11 _NET_ACTIVE_WINDOW atom")?
+        .atom;
+    let active_window_reply = connection
+        .get_property(false, root, active_window_atom, AtomEnum::WINDOW, 0, 1)?
+        .reply()
+        .context("failed to read the X11 active window")?;
+    let active_window = active_window_reply
+        .value32()
+        .and_then(|mut values| values.next())
+        .filter(|window| *window != 0)
+        .ok_or_else(|| anyhow!("the X11 window manager did not report an active window"))?;
+    let change_state_atom = connection
+        .intern_atom(false, b"WM_CHANGE_STATE")?
+        .reply()
+        .context("failed to resolve the X11 WM_CHANGE_STATE atom")?
+        .atom;
+
+    // ICCCM IconicState is 3. Once the VM's grab window is no longer viewable,
+    // the X server automatically releases both its keyboard and pointer grabs.
+    let event = ClientMessageEvent::new(
+        32,
+        active_window,
+        change_state_atom,
+        ClientMessageData::from([3, 0, 0, 0, 0]),
+    );
+    connection
+        .send_event(
+            false,
+            root,
+            EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+            event,
+        )?
+        .check()
+        .context("the X11 window manager rejected the minimize request")?;
+    connection.flush()?;
+
+    let started = Instant::now();
+    while started.elapsed() < Duration::from_millis(750) {
+        let attributes = connection
+            .get_window_attributes(active_window)?
+            .reply()
+            .context("failed to check whether the X11 active window was minimized")?;
+        if attributes.map_state != MapState::VIEWABLE {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    bail!("the X11 active window remained viewable after the minimize request")
 }
 
 #[cfg(target_os = "macos")]
@@ -1631,6 +1859,17 @@ mod tests {
                 command: MediaCommand::Unmute
             }
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parses_linux_screen_lock_probe_outputs() {
+        assert_eq!(parse_linux_lock_active("(true,)"), Some(true));
+        assert_eq!(
+            parse_linux_lock_active("method return\n   boolean false\n"),
+            Some(false)
+        );
+        assert_eq!(parse_linux_lock_active("unexpected reply"), None);
     }
 
     #[test]

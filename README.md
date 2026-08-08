@@ -120,6 +120,8 @@ Watch one sensor from the CLI:
   --on-absence power-off-display
 ```
 
+CLI state lines start with the MSP state's `observed_at` timestamp (or the local receipt time when the server omits it). Background-service event logs use the same timestamps and show the configured entry label or sensor name instead of the generated `entry-...` identifier.
+
 MSP is a plaintext TCP protocol. Run it only on trusted networks or behind a secure transport such as WireGuard, TLS termination, or SSH port forwarding.
 
 CLI action specs:
@@ -156,3 +158,5 @@ Media Control actions use this JSON representation in the shared configuration:
 Valid `command` values are `play`, `pause`, `mute`, `unmute`, `next`, and `previous`.
 
 On Linux, playback commands prefer `playerctl` and fall back to `xdotool`; mute commands try `wpctl`, `pactl`, then `amixer`. Install at least one applicable command-line backend. macOS sends playback commands to the active system media client and controls output mute directly. Windows uses native application commands and the Core Audio endpoint API.
+
+On GNOME, Lock Screen verifies that the screen shield actually became active. If an X11 VM console or another application blocks GNOME's modal keyboard grab, Motional minimizes the active window to make X11 release the grab, then retries and verifies the lock. On native Wayland, it asks GNOME Shell to take focus before retrying. The minimized window remains minimized after unlock.

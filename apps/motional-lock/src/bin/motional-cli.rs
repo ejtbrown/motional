@@ -15,6 +15,7 @@ use motional_clients::service_control::{
     install_service, remove_service, restart_service, service_status, start_service, stop_service,
     ServiceInstallOptions,
 };
+use motional_clients::timestamp::event_timestamp;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about = "CLI client for Motional Service Protocol")]
@@ -196,7 +197,10 @@ fn watch_subscribe(
         match watch_subscribe_once(&args, &on_motion, &on_absence, &action_session) {
             Ok(()) => return Ok(()),
             Err(error) => {
-                eprintln!("motional-cli: {error:#}; reconnecting in 5s");
+                eprintln!(
+                    "{}\tmotional-cli: {error:#}; reconnecting in 5s",
+                    event_timestamp(None)
+                );
                 thread::sleep(Duration::from_secs(5));
             }
         }
@@ -211,7 +215,7 @@ fn watch_subscribe_once(
 ) -> Result<()> {
     let mut connection = connect(&args.common, "motional-cli")?;
     let subscription_id = connection.subscribe(std::slice::from_ref(&args.sensor), true)?;
-    eprintln!("subscribed as {subscription_id}");
+    eprintln!("{}\tsubscribed as {subscription_id}", event_timestamp(None));
 
     let mut last_triggered: Option<bool> = None;
     loop {
@@ -269,7 +273,7 @@ fn watch_poll(
                     );
                 }
             }
-            Err(error) => eprintln!("motional-cli: {error:#}"),
+            Err(error) => eprintln!("{}\tmotional-cli: {error:#}", event_timestamp(None)),
         }
         thread::sleep(Duration::from_secs(args.poll_interval));
     }
@@ -284,7 +288,8 @@ fn handle_state(
     dry_run: bool,
     action_session: &ActionSession,
 ) {
-    print_state(state);
+    let timestamp = event_timestamp(state.observed_at.as_deref());
+    print_state_at(state, &timestamp);
 
     let Some(triggered) = state.triggered else {
         return;
@@ -308,10 +313,14 @@ fn handle_state(
 
     for result in execute_actions_with_session(actions, dry_run, action_session) {
         if result.ok {
-            eprintln!("{} action succeeded: {}", trigger.label(), result.label);
+            eprintln!(
+                "{timestamp}\t{} action succeeded: {}",
+                trigger.label(),
+                result.label
+            );
         } else {
             eprintln!(
-                "{} action failed: {}: {}",
+                "{timestamp}\t{} action failed: {}: {}",
                 trigger.label(),
                 result.label,
                 result.message
@@ -321,6 +330,15 @@ fn handle_state(
 }
 
 fn print_state(state: &SensorState) {
+    let timestamp = event_timestamp(state.observed_at.as_deref());
+    print_state_at(state, &timestamp);
+}
+
+fn print_state_at(state: &SensorState, timestamp: &str) {
+    println!("{}", format_state_line(state, timestamp));
+}
+
+fn format_state_line(state: &SensorState, timestamp: &str) -> String {
     let triggered = state
         .triggered
         .map(|value| value.to_string())
@@ -330,10 +348,10 @@ fn print_state(state: &SensorState) {
         .map(|value| value.to_string())
         .unwrap_or_else(|| "unknown".to_string());
     let status = state.status.as_deref().unwrap_or("unknown");
-    println!(
-        "{}\ttriggered={}\tstatus={}\tseconds_since_triggered={}",
-        state.name, triggered, status, since
-    );
+    format!(
+        "{}\t{}\ttriggered={}\tstatus={}\tseconds_since_triggered={}",
+        timestamp, state.name, triggered, status, since
+    )
 }
 
 fn connect(args: &CommonArgs, client_name: &str) -> Result<MspConnection> {
@@ -385,4 +403,28 @@ fn config(args: ConfigArgs) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_line_starts_with_event_timestamp() {
+        let state = SensorState {
+            name: "office".to_string(),
+            triggered: Some(true),
+            status: Some("ok".to_string()),
+            last_triggered_at: None,
+            seconds_since_triggered: Some(0),
+            observed_at: Some("2026-08-08T14:06:01.000Z".to_string()),
+            sequence: None,
+            raw: None,
+        };
+
+        assert_eq!(
+            format_state_line(&state, state.observed_at.as_deref().unwrap()),
+            "2026-08-08T14:06:01.000Z\toffice\ttriggered=true\tstatus=ok\tseconds_since_triggered=0"
+        );
+    }
 }

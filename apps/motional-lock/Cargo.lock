@@ -2087,7 +2087,7 @@ dependencies = [
 
 [[package]]
 name = "motional-clients"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2102,6 +2102,7 @@ dependencies = [
  "wgpu",
  "windows 0.61.3",
  "winresource",
+ "x11rb",
 ]
 
 [[package]]
