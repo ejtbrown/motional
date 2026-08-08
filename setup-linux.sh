@@ -4,56 +4,85 @@ set -euo pipefail
 APP_NAME="Motional"
 APP_ID="com.ejtbrown.motional"
 BIN_NAME="motional-gui"
-INSTALL_BIN="/usr/bin/${BIN_NAME}"
 INSTALL_BINS=("motional-gui" "motional-cli" "motional-service")
-DESKTOP_FILE="/usr/share/applications/${APP_ID}.desktop"
-OLD_DESKTOP_FILE="/usr/share/applications/motional-gui.desktop"
 ICON_NAME="${APP_ID}"
-ICON_FILE="/usr/share/icons/hicolor/512x512/apps/${ICON_NAME}.png"
-OLD_ICON_FILE="/usr/share/icons/hicolor/512x512/apps/motional-gui.png"
-PIXMAP_ICON_FILE="/usr/share/pixmaps/${ICON_NAME}.png"
-OLD_PIXMAP_ICON_FILE="/usr/share/pixmaps/motional-gui.png"
+INSTALL_ROOT="${MOTIONAL_INSTALL_ROOT:-}"
+INSTALL_BIN="/usr/bin/${BIN_NAME}"
+DESKTOP_FILE="${INSTALL_ROOT}/usr/share/applications/${APP_ID}.desktop"
+OLD_DESKTOP_FILE="${INSTALL_ROOT}/usr/share/applications/motional-gui.desktop"
+ICON_FILE="${INSTALL_ROOT}/usr/share/icons/hicolor/512x512/apps/${ICON_NAME}.png"
+OLD_ICON_FILE="${INSTALL_ROOT}/usr/share/icons/hicolor/512x512/apps/motional-gui.png"
+PIXMAP_ICON_FILE="${INSTALL_ROOT}/usr/share/pixmaps/${ICON_NAME}.png"
+OLD_PIXMAP_ICON_FILE="${INSTALL_ROOT}/usr/share/pixmaps/motional-gui.png"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLIENT_DIR="${REPO_ROOT}/apps/motional-lock"
-ICON_SOURCE="${CLIENT_DIR}/assets/motional-icon.png"
+SOURCE_BINARY_DIR="${CLIENT_DIR}/target/release"
+PACKAGED_BINARY_DIR="${REPO_ROOT}"
+SOURCE_ICON="${CLIENT_DIR}/assets/motional-icon.png"
+PACKAGED_ICON="${REPO_ROOT}/motional-icon.png"
+
+has_all_binaries() {
+  local binary_dir="$1"
+  local binary_name
+
+  for binary_name in "${INSTALL_BINS[@]}"; do
+    if [[ ! -x "${binary_dir}/${binary_name}" ]]; then
+      return 1
+    fi
+  done
+
+  return 0
+}
 
 if [[ "$(uname -s)" != "Linux" ]]; then
   echo "setup-linux.sh can only be run on Linux." >&2
   exit 1
 fi
 
-if [[ "${EUID}" -ne 0 ]]; then
+if [[ "${EUID}" -ne 0 && -z "${INSTALL_ROOT}" ]]; then
   echo "This installer writes to /usr/bin and /usr/share/applications." >&2
   echo "Run it with sudo: sudo ./setup-linux.sh" >&2
   exit 1
 fi
 
-missing_bin=false
-for install_bin in "${INSTALL_BINS[@]}"; do
-  if [[ ! -x "${CLIENT_DIR}/target/release/${install_bin}" ]]; then
-    missing_bin=true
+if has_all_binaries "${PACKAGED_BINARY_DIR}"; then
+  BINARY_DIR="${PACKAGED_BINARY_DIR}"
+elif [[ -f "${CLIENT_DIR}/Cargo.toml" ]]; then
+  BINARY_DIR="${SOURCE_BINARY_DIR}"
+
+  if ! has_all_binaries "${BINARY_DIR}"; then
+    if ! command -v cargo >/dev/null 2>&1; then
+      echo "cargo is required to build Motional binaries." >&2
+      exit 1
+    fi
+
+    echo "Building Motional binaries..."
+    cargo build --release --locked --bins --manifest-path "${CLIENT_DIR}/Cargo.toml"
   fi
-done
-
-if [[ "${missing_bin}" == true ]]; then
-  if ! command -v cargo >/dev/null 2>&1; then
-    echo "cargo is required to build Motional binaries." >&2
-    exit 1
-  fi
-
-  echo "Building Motional binaries..."
-  cargo build --release --bins --manifest-path "${CLIENT_DIR}/Cargo.toml"
-fi
-
-for install_bin in "${INSTALL_BINS[@]}"; do
-  echo "Installing ${install_bin} to /usr/bin/${install_bin}..."
-  install -D -m 0755 "${CLIENT_DIR}/target/release/${install_bin}" "/usr/bin/${install_bin}"
-done
-
-if [[ ! -f "${ICON_SOURCE}" ]]; then
-  echo "Icon file not found: ${ICON_SOURCE}" >&2
+else
+  echo "Motional binaries were not found beside setup-linux.sh, and this is not a source checkout." >&2
+  echo "Download and extract the complete Linux release archive before running the installer." >&2
   exit 1
 fi
+
+if ! has_all_binaries "${BINARY_DIR}"; then
+  echo "One or more Motional binaries are missing from ${BINARY_DIR}." >&2
+  exit 1
+fi
+
+if [[ -f "${PACKAGED_ICON}" ]]; then
+  ICON_SOURCE="${PACKAGED_ICON}"
+elif [[ -f "${SOURCE_ICON}" ]]; then
+  ICON_SOURCE="${SOURCE_ICON}"
+else
+  echo "Motional icon was not found beside setup-linux.sh or in the source checkout." >&2
+  exit 1
+fi
+
+for install_bin in "${INSTALL_BINS[@]}"; do
+  echo "Installing ${install_bin} to ${INSTALL_ROOT}/usr/bin/${install_bin}..."
+  install -D -m 0755 "${BINARY_DIR}/${install_bin}" "${INSTALL_ROOT}/usr/bin/${install_bin}"
+done
 
 echo "Installing application icon..."
 if command -v convert >/dev/null 2>&1; then
@@ -90,11 +119,11 @@ StartupNotify=true
 StartupWMClass=${APP_ID}
 EOF
 
-if command -v update-desktop-database >/dev/null 2>&1; then
+if [[ -z "${INSTALL_ROOT}" ]] && command -v update-desktop-database >/dev/null 2>&1; then
   update-desktop-database /usr/share/applications >/dev/null 2>&1 || true
 fi
 
-if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+if [[ -z "${INSTALL_ROOT}" ]] && command -v gtk-update-icon-cache >/dev/null 2>&1; then
   gtk-update-icon-cache -q /usr/share/icons/hicolor >/dev/null 2>&1 || true
 fi
 

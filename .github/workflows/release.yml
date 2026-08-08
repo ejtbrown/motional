@@ -59,8 +59,25 @@ jobs:
           cp target/release/motional-cli "dist/${{ matrix.asset_name }}/"
           cp target/release/motional-gui "dist/${{ matrix.asset_name }}/"
           cp target/release/motional-service "dist/${{ matrix.asset_name }}/"
+          cp assets/motional-icon.png "dist/${{ matrix.asset_name }}/"
           cp ../../README.md ../../setup-linux.sh "dist/${{ matrix.asset_name }}/"
           tar -C dist -czf "dist/${{ matrix.archive_name }}" "${{ matrix.asset_name }}"
+
+      - name: Verify Linux release installer
+        if: matrix.package_command == 'linux'
+        run: |
+          set -euo pipefail
+          archive_root="$(mktemp -d)"
+          install_root="$(mktemp -d)"
+          tar -C "$archive_root" -xzf "dist/${{ matrix.archive_name }}"
+          release_dir="$archive_root/${{ matrix.asset_name }}"
+          MOTIONAL_INSTALL_ROOT="$install_root" "$release_dir/setup-linux.sh"
+          for binary in motional-cli motional-gui motional-service; do
+            test -x "$install_root/usr/bin/$binary"
+          done
+          test -f "$install_root/usr/share/applications/com.ejtbrown.motional.desktop"
+          test -f "$install_root/usr/share/icons/hicolor/512x512/apps/com.ejtbrown.motional.png"
+          test -f "$install_root/usr/share/pixmaps/com.ejtbrown.motional.png"
 
       - name: Package Windows release
         if: matrix.package_command == 'windows'
